@@ -61,6 +61,7 @@
 | D5 | 配置加载/模板/state.toml/多源会话/侧栏/预设/check_ident | serde tag 需 `rename_all="lowercase"`；TOML 内联表不能作根文档；**docker Range 的 since 必须直接 match mode**（apply_to_source 路径删除） |
 | D6 | 详情面板（±N 上下文/▶）/c/t/p/q + trace_id 抽取 | parse_line 补 extract_trace_id（§19 TODO 最小实现） |
 | D7 | C 清屏/失败红字/R/L/f/Ended 终态 + 本节文档回填 | 状态栏 keyhint 全量；README |
+| 扫尾 | **遗漏补强**：LineBuffer 剥 ``（CRLF 污染级别检测）、CRLF/超长10KB 跨块单测、集成测试扩到 5 个（高吞吐 500 行分包、泵 EOF 自退、泵停止路径）、tracing 初始化（LOGTAIL_LOG=1 写文件不污染 TUI）、clippy 清零 | 33 用例全绿 |
 
 **踩坑（复现成本高，留档）**：
 1. russh 0.44 client/server `Handler` 是 `#[async_trait]`——impl 必须加同一宏，否则 E0195。
@@ -1791,7 +1792,7 @@ async fn eof_terminates_pump() {
 ## 十八、落地验证清单
 
 - [x] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）——已落地
-- [x] `cargo test` 全绿（§十七 的 27 个用例：26 单测 + 1 集成）——已落地
+- [x] `cargo test` 全绿（33 个用例：28 单测 + 5 集成）——已落地
 - [x] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令——已落地（TUI 交互待真机手测）
 - [x] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（front 偏移实现）——已落地
 - [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地
@@ -1805,7 +1806,7 @@ async fn eof_terminates_pump() {
 - [x] **一键预设**：侧栏选"仅ERROR(1h)"回车 → 级别切 Error、会话按 1h 重连；`remember_last_source` 启动自动连——已落地
 - [x] 非法容器名 `x;rm` → `UnsafeInput`，**不**发往远端；since/until 塞 `;` 同样被拒（§17 用例锁定）——已落地
 - [x] 远端命令结束后：状态栏"已结束"、session 移除（+disconnect）、不再每帧刷；按 `R` 可重连——已落地
-- [x] 高吞吐：每帧 ≤200 行预算、整批消化不截断（§13）——逻辑落地，真机压测待用户
+- [x] 高吞吐：**500 行分包重组集成测试锁定不丢不乱** + 每帧 ≤200 行预算、整批消化不截断（§13）——已落地
 - [x] 断网 / 认证失败 / 连接超时(20s) → `SessionState::Failed` + 状态栏红字，不 panic，可 `R`——已落地
 - [ ] 窗口缩放/ANSI/超长行：布局逐帧重算、超长行截断显示（逻辑就绪）；ANSI 混合输出按 §19 已知限制处理——真机手测待用户
 

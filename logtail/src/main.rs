@@ -4,6 +4,7 @@ use anyhow::Result;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--demo") {
         demo().await
@@ -11,6 +12,26 @@ async fn main() -> Result<()> {
         let config = logtail::config::load()?;
         logtail::app::run(config).await
     }
+}
+
+/// 自身排障日志（§2）：设 LOGTAIL_LOG=1 时写 ./logtail.log（绝不污染 TUI stdout）
+fn init_tracing() {
+    if std::env::var("LOGTAIL_LOG").is_err() {
+        return;
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(|| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("logtail.log")
+                .expect("打开 logtail.log")
+        })
+        .try_init();
 }
 
 /// 无头冒烟通道（Day2 形态）：行 → parse → buffer → 末尾 40 行着色打印

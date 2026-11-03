@@ -30,13 +30,18 @@ pub struct LineBuffer {
 
 impl LineBuffer {
     /// 返回本次字节块中产生的【所有】完整行；未成行部分留在内部。
+    /// CRLF 行尾剥掉 `\r`（远端 Windows 风格输出常见，残留会污染级别检测与显示）。
     pub fn push(&mut self, data: &[u8]) -> Vec<String> {
         let text = String::from_utf8_lossy(data);
         let mut out = Vec::new();
         let mut start = 0;
         for (i, ch) in text.char_indices() {
             if ch == '\n' {
-                out.push(self.partial.clone() + &text[start..i]);
+                let mut line = self.partial.clone() + &text[start..i];
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                out.push(line);
                 self.partial.clear();
                 start = i + 1;
             }
@@ -102,6 +107,8 @@ impl LogStream {
 
 #[cfg(test)]
 mod tests {
+    #![allow(non_snake_case)] // 用例名含中文段落，非 snake_case 是刻意的
+
     use super::*;
 
     #[test]
@@ -117,6 +124,28 @@ mod tests {
         assert!(lb.push(b"hello ").is_empty());
         assert_eq!(lb.push(b"world\nbye"), vec!["hello world"]);
         assert_eq!(lb.partial(), "bye");
+    }
+
+    #[test]
+    fn lb_crlf_行尾剥回车() {
+        let mut lb = LineBuffer::default();
+        assert_eq!(lb.push(b"a\r\nb\r\n"), vec!["a", "b"]);
+        assert!(lb.is_idle());
+    }
+
+    #[test]
+    fn lb_超长单行_10KB不截断() {
+        // §18：超长单行（>10KB 栈回溯）不崩不截断
+        let mut lb = LineBuffer::default();
+        let big = "x".repeat(10_240);
+        let payload = format!("{big}\n");
+        assert_eq!(lb.push(payload.as_bytes()), vec![big]);
+        // 跨块的超长行同样完整（末块带 \n 才成行）
+        let big2 = "y".repeat(12_000);
+        assert!(lb.push(&big2.as_bytes()[..5_000]).is_empty());
+        let mut tail = big2.as_bytes()[5_000..].to_vec();
+        tail.push(b'\n');
+        assert_eq!(lb.push(&tail), vec![big2]);
     }
 
     #[test]
