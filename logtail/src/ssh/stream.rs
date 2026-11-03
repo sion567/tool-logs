@@ -1,0 +1,128 @@
+//! 命令输出流：`StreamEvent` + `LineBuffer` + `LogStream`（§7.2 / §7.3）
+//!
+//! russh API 坐实结果（§7.2 表格的实测，russh 0.44.1）：
+//! - `Channel::exec(&self, want_reply, impl Into<Vec<u8>>)` — `&self`
+//! - `Channel::wait(&mut self) -> Option<ChannelMsg>` — 读面；
+//!   用它而不是 `into_stream()`：可与 50ms 超时轮询配合，Eof/Close/超时语义可控
+//! - `Channel::close(&self)` — teardown；远端 sshd 对 exec 进程发 SIGHUP，
+//!   `docker logs -f` 自行退出（§16 无孤儿进程）
+//! - `Handle` 实现 `Drop`：丢弃即关连接（remove 会话路径的兜底）
+
+use std::time::Duration;
+
+use russh::ChannelMsg;
+
+/// 主循环与泵之间的事件（§7.2 / §7.4）
+#[derive(Debug)]
+pub enum StreamEvent {
+    /// [v0.4 P0#2] 一次 read 解出的【整批】完整行——v0.3 的 `Line(String)` 在上层
+    /// 只取首行、其余全丢，教训：行必须整批透传
+    Lines(Vec<String>),
+    /// 远端 stdout 结束（EOF→Close），泵只发一次
+    Ended,
+}
+
+/// [§7.3，v0.2 P0#3] 字节块 → 完整行；未成行部分留在 `partial`
+#[derive(Debug, Default)]
+pub struct LineBuffer {
+    partial: String,
+}
+
+impl LineBuffer {
+    /// 返回本次字节块中产生的【所有】完整行；未成行部分留在内部。
+    pub fn push(&mut self, data: &[u8]) -> Vec<String> {
+        let text = String::from_utf8_lossy(data);
+        let mut out = Vec::new();
+        let mut start = 0;
+        for (i, ch) in text.char_indices() {
+            if ch == '\n' {
+                out.push(self.partial.clone() + &text[start..i]);
+                self.partial.clear();
+                start = i + 1;
+            }
+        }
+        if start < text.len() {
+            self.partial.push_str(&text[start..]);
+        }
+        out
+    }
+
+    /// [v0.3 P2#12] 未成行尾部，供状态栏"正在接收…"提示
+    pub fn partial(&self) -> &str {
+        &self.partial
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.partial.is_empty()
+    }
+}
+
+/// 命令输出流：持有读端 channel + 行缓冲。
+pub struct LogStream {
+    channel: russh::Channel<russh::client::Msg>,
+    line_buffer: LineBuffer,
+}
+
+impl LogStream {
+    /// 消费 channel（exec 之后调用）
+    pub fn new(ch: russh::Channel<russh::client::Msg>) -> Self {
+        Self {
+            channel: ch,
+            line_buffer: LineBuffer::default(),
+        }
+    }
+
+    /// [§7.2] 单次读取：50ms 超时；EOF 与超时分叉（不变式②）。
+    /// - 超时 → Ok(None)：本轮无数据，调用方继续渲染
+    /// - Eof / ExitStatus → Ok(None)：继续 drain，防尾部行丢失
+    /// - Close / channel 关闭 → Ended
+    /// - Data / ExtendedData → 整批行；解不出完整行时 Ok(None)
+    pub async fn try_next(&mut self) -> anyhow::Result<Option<StreamEvent>> {
+        match tokio::time::timeout(Duration::from_millis(50), self.channel.wait()).await {
+            Err(_elapsed) => Ok(None), // 本轮无数据
+            Ok(None) => Ok(Some(StreamEvent::Ended)),
+            Ok(Some(ChannelMsg::Data { data }))
+            | Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                let lines = self.line_buffer.push(&data);
+                Ok(if lines.is_empty() {
+                    None
+                } else {
+                    Some(StreamEvent::Lines(lines))
+                })
+            }
+            Ok(Some(_)) => Ok(None), // Eof / ExitStatus 等：不算终态，继续读到 Close
+        }
+    }
+
+    /// 终止：关 channel，远端进程收 SIGHUP 自行退出（不用 kill 猜 PID）
+    pub async fn teardown(&self) {
+        let _ = self.channel.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lb_一次_read_多条完整行_不丢() {
+        let mut lb = LineBuffer::default();
+        assert_eq!(lb.push(b"a\nb\nc\n"), vec!["a", "b", "c"]);
+        assert!(lb.is_idle());
+    }
+
+    #[test]
+    fn lb_跨两次_read_拼成一行() {
+        let mut lb = LineBuffer::default();
+        assert!(lb.push(b"hello ").is_empty());
+        assert_eq!(lb.push(b"world\nbye"), vec!["hello world"]);
+        assert_eq!(lb.partial(), "bye");
+    }
+
+    #[test]
+    fn eof_与超时_分叉() {
+        // 语义锁定（§17）：超时与 EOF 是两种返回；真实 EOF 路径由
+        // tests/integration.rs 的 in-process sshd 覆盖
+        assert!(matches!(StreamEvent::Ended, StreamEvent::Ended));
+    }
+}

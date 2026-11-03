@@ -1,0 +1,22 @@
+//! 服务器与认证配置（§7.1、§8）
+
+use serde::{Deserialize, Serialize};
+
+/// [v0.3 P1#5] 具名字段 + serde 内部 tag，才能被
+/// `auth = { type = "password", password = "x" }` 这类 toml 内联表反序列化。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum AuthCfg {
+    Password { password: String },
+    Key { path: String, passphrase: Option<String> },
+}
+
+/// 服务器声明（§8）
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerConfig {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub auth: AuthCfg,
+}
