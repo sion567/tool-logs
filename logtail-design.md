@@ -61,7 +61,8 @@
 | D5 | 配置加载/模板/state.toml/多源会话/侧栏/预设/check_ident | serde tag 需 `rename_all="lowercase"`；TOML 内联表不能作根文档；**docker Range 的 since 必须直接 match mode**（apply_to_source 路径删除） |
 | D6 | 详情面板（±N 上下文/▶）/c/t/p/q + trace_id 抽取 | parse_line 补 extract_trace_id（§19 TODO 最小实现） |
 | D7 | C 清屏/失败红字/R/L/f/Ended 终态 + 本节文档回填 | 状态栏 keyhint 全量；README |
-| 扫尾 | **遗漏补强**：LineBuffer 剥 ``（CRLF 污染级别检测）、CRLF/超长10KB 跨块单测、集成测试扩到 5 个（高吞吐 500 行分包、泵 EOF 自退、泵停止路径）、tracing 初始化（LOGTAIL_LOG=1 写文件不污染 TUI）、clippy 清零 | 33 用例全绿 |
+| 扫尾 | **遗漏补强**：LineBuffer 剥 `
+`（CRLF 污染级别检测）、CRLF/超长10KB 跨块单测、集成测试扩到 5 个（高吞吐 500 行分包、泵 EOF 自退、泵停止路径）、tracing 初始化（LOGTAIL_LOG=1 写文件不污染 TUI）、clippy 清零 | 33 用例全绿 |
 
 **踩坑（复现成本高，留档）**：
 1. russh 0.44 client/server `Handler` 是 `#[async_trait]`——impl 必须加同一宏，否则 E0195。
@@ -257,13 +258,13 @@ ratatui render（viewport 只渲染可见行，O(可见) 而非 O(buffer)）
 **目标**：连上服务器，`docker logs -f` 的日志在本地终端滚动起来。
 
 **任务清单**
-- [ ] `cargo init --name logtail && cd logtail`
-- [ ] `Cargo.toml` 加 `russh`, `russh-keys`, `tokio`, `anyhow`, `thiserror`
-- [ ] 实现 `ssh::client::connect()`：先只做密码认证
-- [ ] 实现 `ssh::stream::LogStream::new()` + `try_next()`：返回 `StreamEvent`
-- [ ] `main.rs` 硬编码 host/user/password + 命令 `"docker logs -f --tail 100 my-container"`
-- [ ] 用 `tokio::select!` 跑：有行就 `println!`，`Ended` 就 break
-- [ ] **坐实 russh API**：`cargo doc -p russh`，把 `into_stream` / `handle` 形态填进 §7.2 表格
+- [x] `cargo init --name logtail && cd logtail`
+- [x] `Cargo.toml` 加 `russh`, `russh-keys`, `tokio`, `anyhow`, `thiserror`
+- [x] 实现 `ssh::client::connect()`：先只做密码认证
+- [x] 实现 `ssh::stream::LogStream::new()` + `try_next()`：返回 `StreamEvent`
+- [x] `main.rs` 硬编码 host/user/password + 命令 `"docker logs -f --tail 100 my-container"`
+- [x] 用 `tokio::select!` 跑：有行就 `println!`，`Ended` 就 break
+- [x] **坐实 russh API**：`cargo doc -p russh`，把 `into_stream` / `handle` 形态填进 §7.2 表格
 
 **验收**：`cargo run` 看到容器日志持续滚，Ctrl+C 能干净退出（无僵尸 `docker logs` 进程）。
 
@@ -292,12 +293,12 @@ async fn main() -> anyhow::Result<()> {
 **目标**：不再 `println`，日志进 buffer，ERROR/WARN/INFO 各显其色。
 
 **任务清单**
-- [ ] `log::buffer::LogBuffer`：`push` 赋 `line_no`，上限淘汰，补 `by_line_no`
-- [ ] `log::parser::detect_level`：大小写不敏感
-- [ ] `log::parser::parse_docker_json`：拆包壳，只调一次
-- [ ] `log::color::colorize`：`\x1b[31m` / `33m` / `32m` / `36m` + 重置
-- [ ] 主循环：行 → `parse` → `buffer.push` → 从 buffer 末尾取 40 行着色打印
-- [ ] 跑通 §17 的 `lb_一次_read_多条完整行_不丢` 等 3 个 LineBuffer/buffer 测试
+- [x] `log::buffer::LogBuffer`：`push` 赋 `line_no`，上限淘汰，补 `by_line_no`
+- [x] `log::parser::detect_level`：大小写不敏感
+- [x] `log::parser::parse_docker_json`：拆包壳，只调一次
+- [x] `log::color::colorize`：`\x1b[31m` / `33m` / `32m` / `36m` + 重置
+- [x] 主循环：行 → `parse` → `buffer.push` → 从 buffer 末尾取 40 行着色打印
+- [x] 跑通 §17 的 `lb_一次_read_多条完整行_不丢` 等 3 个 LineBuffer/buffer 测试
 
 **验收**：一次灌入 100 行混级别日志，三条全显示、级别色正确、无半行截断。
 
@@ -306,11 +307,11 @@ async fn main() -> anyhow::Result<()> {
 **目标**：日志在 TUI 中间区滚动，不再刷屏。
 
 **任务清单**
-- [ ] 加 `ratatui`, `crossterm`
-- [ ] `ui::layout::layout(area, has_detail)`：标题(3) / 主体 / 状态栏(1)；主体再分左栏(24) + 右区 [v0.4 P1#6]
-- [ ] `ui::render`：标题行、侧栏占位、日志区 `Paragraph` + `Scrollbar`、状态栏
-- [ ] `main` 里 `enable_raw_mode` / `Terminal::new` / `disable_raw_mode` 配对，`q` 退出恢复终端
-- [ ] 日志区按 viewport 只渲染可见切片，选中行反白
+- [x] 加 `ratatui`, `crossterm`
+- [x] `ui::layout::layout(area, has_detail)`：标题(3) / 主体 / 状态栏(1)；主体再分左栏(24) + 右区 [v0.4 P1#6]
+- [x] `ui::render`：标题行、侧栏占位、日志区 `Paragraph` + `Scrollbar`、状态栏
+- [x] `main` 里 `enable_raw_mode` / `Terminal::new` / `disable_raw_mode` 配对，`q` 退出恢复终端
+- [x] 日志区按 viewport 只渲染可见切片，选中行反白
 
 **验收**：打开是 TUI 界面；`q` 退出后终端不乱；窗口缩放不崩。
 
@@ -319,11 +320,11 @@ async fn main() -> anyhow::Result<()> {
 **目标**：`/` 进入过滤，回车即时筛，Esc 清空。
 
 **任务清单**
-- [ ] `log::filter`：`FilterMode(Arc<Regex>, String)` + `#[derive(Clone)]`
-- [ ] `FilterState` 四态 + §11.2 转换规则
-- [ ] `ui::input::handle_filter_key`：Typing 里编辑、回车确认、Esc 清空、正则错落 Error 态
-- [ ] 渲染期：`matches_filter && level_filter.matches`，命中 `line_no` 缓存，`last_rebuild` 控重建
-- [ ] 状态栏显示当前过滤文本 + `✓` / `✗`
+- [x] `log::filter`：`FilterMode(Arc<Regex>, String)` + `#[derive(Clone)]`
+- [x] `FilterState` 四态 + §11.2 转换规则
+- [x] `ui::input::handle_filter_key`：Typing 里编辑、回车确认、Esc 清空、正则错落 Error 态
+- [x] 渲染期：`matches_filter && level_filter.matches`，命中 `line_no` 缓存，`last_rebuild` 控重建
+- [x] 状态栏显示当前过滤文本 + `✓` / `✗`
 
 **验收**：`/` 输 `ERROR` 回车 → 只显 ERROR/WARN（按 >= 语义）；再 `/` → 回显 `ERROR`；Esc → 全量。
 
@@ -332,13 +333,13 @@ async fn main() -> anyhow::Result<()> {
 **目标**：`config.toml` 定义服务器与源，左栏选源回车即连。
 
 **任务清单**
-- [ ] `config::ServerConfig` / `SourceConfig` + serde 反序列化（`AuthCfg` 用 `#[serde(tag="type")]`）
-- [ ] `config::load` 读 `~/.config/logtail/config.toml`，`~` 展开，缺文件给模板
-- [ ] `source::LogSource::to_command(mode)`：docker/file/journal 三分支，**journal 接 mode**
-- [ ] `check_ident` + `shell_quote` 在 `to_command` 入口拦截
-- [ ] 左栏渲染服务器树 + 源列表；回车 → spawn `ActiveSession` → 塞 buffer
-- [ ] 侧栏交互：`Tab` 切焦点、`↑↓` 选源/预设、`Enter` 连接/应用（§14）；`remember_last_source` 启动自动连上次源
-- [ ] 一个源连着时切另一源 = 新建会话，旧会话 teardown
+- [x] `config::ServerConfig` / `SourceConfig` + serde 反序列化（`AuthCfg` 用 `#[serde(tag="type")]`）
+- [x] `config::load` 读 `~/.config/logtail/config.toml`，`~` 展开，缺文件给模板
+- [x] `source::LogSource::to_command(mode)`：docker/file/journal 三分支，**journal 接 mode**
+- [x] `check_ident` + `shell_quote` 在 `to_command` 入口拦截
+- [x] 左栏渲染服务器树 + 源列表；回车 → spawn `ActiveSession` → 塞 buffer
+- [x] 侧栏交互：`Tab` 切焦点、`↑↓` 选源/预设、`Enter` 连接/应用（§14）；`remember_last_source` 启动自动连上次源
+- [x] 一个源连着时切另一源 = 新建会话，旧会话 teardown
 
 **验收**：配置里 3 个源（docker/file/journal）各连一次，命令串与模式匹配。
 
@@ -347,11 +348,11 @@ async fn main() -> anyhow::Result<()> {
 **目标**：上下键选中行，底部展开详情 + 上下文；`1..4` 切级别。
 
 **任务清单**
-- [ ] `selected_line_no: Option<u64>`；上翻自动暂停跟随
-- [ ] 详情面板：时间 / 级别 / 源 / 原始行 / 上下文 ±N / 操作提示
-- [ ] `LevelFilter` 统一 `>=`；`1`=Error `2`=Warn `3`=Info `4`=Debug `0`=All
-- [ ] 详情态 `c` 复制、`t` 按 trace_id 过滤、`p` 只看该源、`q` 关面板
-- [ ] 空格暂停/恢复跟随；`G` 跳最新
+- [x] `selected_line_no: Option<u64>`；上翻自动暂停跟随
+- [x] 详情面板：时间 / 级别 / 源 / 原始行 / 上下文 ±N / 操作提示
+- [x] `LevelFilter` 统一 `>=`；`1`=Error `2`=Warn `3`=Info `4`=Debug `0`=All
+- [x] 详情态 `c` 复制、`t` 按 trace_id 过滤、`p` 只看该源、`q` 关面板
+- [x] 空格暂停/恢复跟随；`G` 跳最新
 
 **验收**：选中 ERROR 行，上下文把该行标 `▶`；`1` 键只留 ERROR；`c` 后剪贴板有原文。
 
@@ -360,12 +361,12 @@ async fn main() -> anyhow::Result<()> {
 **目标**：把工具用进真实问题，修掉这一周暴露的毛刺。
 
 **任务清单**
-- [ ] `Ended` 处理：状态栏"已结束"、remove session、不再刷
-- [ ] `R` 重连：先 teardown 旧会话再 spawn
-- [ ] `L` 加载更早：since 前移，重建会话
-- [ ] 断网/认证失败 → `SessionState::Failed` + 红字，不 panic
-- [ ] `C` 清屏（只清显示标记，不断连）
-- [ ] **自己用它查一个真实 bug**，把卡点记进 §19 TODO
+- [x] `Ended` 处理：状态栏"已结束"、remove session、不再刷
+- [x] `R` 重连：先 teardown 旧会话再 spawn
+- [x] `L` 加载更早：since 前移，重建会话
+- [x] 断网/认证失败 → `SessionState::Failed` + 红字，不 panic
+- [x] `C` 清屏（只清显示标记，不断连）
+- [ ] **自己用它查一个真实 bug**，把卡点记进 §19 TODO  ← 使用阶段你来跑，卡点记 §19
 
 **验收**：全流程跑通一遍"发现报错 → 过滤 → 下钻 → 复制证据 → 重连"，无崩溃。
 
