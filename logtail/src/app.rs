@@ -12,11 +12,11 @@ use ratatui::Terminal;
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::log::parser::parse_line;
-use crate::log::LogBuffer;
+use crate::log::{FilterMode, FilterState, LevelFilter, LogBuffer};
 use crate::source::SourceType;
 use crate::ssh::session::ActiveSession;
 use crate::ssh::stream::StreamEvent;
-use crate::ui::input::handle_normal_key;
+use crate::ui::input::{handle_filter_key, handle_normal_key};
 use crate::ui::render::render;
 
 /// 源的逻辑 ID = config 里的 source.name（如 "prod-api"）。（§9 [v0.4 P2#6]）
@@ -49,6 +49,16 @@ pub struct AppState {
     /// Day5 换成 HashMap<SourceId, LogSource>；Day3 先记源类型供解析器用
     pub source_types: HashMap<SourceId, SourceType>,
 
+    // ---- 过滤（§11）----
+    /// [v0.4 P2#5] 唯一真理：生效过滤只存 Active(fm)，读经 active_filter()
+    pub filter_state: FilterState,
+    pub level_filter: LevelFilter,
+    pub regex_mode: bool,
+    /// buffer 变更或过滤变更 → +1，视图层据此重建命中缓存（§9 [v0.3 P1#4]）
+    pub last_rebuild: u64,
+    /// [v0.4 P2#2] 命中缓存：last_rebuild 变了才重算，渲染帧直接复用 hits
+    pub view_cache: ViewCache,
+
     // ---- 视图 ----
     pub selected_line_no: Option<u64>, // 只认 line_no，不认下标
     pub detail_panel: Option<DetailPanel>, // Day6 启用
@@ -68,6 +78,13 @@ pub struct DetailPanel {
     pub context_after: usize,
 }
 
+/// [v0.4 P2#2] 命中缓存：生成时 last_rebuild 的值 + line_no 序列
+#[derive(Debug, Default)]
+pub struct ViewCache {
+    pub built_at: u64,
+    pub hits: Vec<u64>,
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self {
@@ -76,6 +93,11 @@ impl AppState {
             active_source: None,
             buffers: HashMap::new(),
             source_types: HashMap::new(),
+            filter_state: FilterState::Idle,
+            level_filter: LevelFilter::All,
+            regex_mode: false,
+            last_rebuild: 0,
+            view_cache: ViewCache::default(),
             selected_line_no: None,
             detail_panel: None,
             viewport: Viewport::default(),
@@ -97,6 +119,11 @@ impl AppState {
     /// 主循环/解析器取源类型（§9）；未知源按 File（不拆 docker 包壳），不 panic
     pub fn source_type_of(&self, sid: &SourceId) -> SourceType {
         self.source_types.get(sid).copied().unwrap_or(SourceType::File)
+    }
+
+    /// 当前生效过滤的唯一读取口：Idle/Typing/Error 一律视为无过滤（§11.3 [v0.4 P2#5]）
+    pub fn active_filter(&self) -> &FilterMode {
+        crate::log::active_filter_of(&self.filter_state)
     }
 }
 
@@ -141,11 +168,16 @@ pub async fn main_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|f| render(f, &mut st))?;
-        // 1) 输入事件（§13 分发顺序：过滤层 Day4 > 详情层 Day6 > 正常层）
+        // 1) 输入事件（§13 分发顺序：过滤层 > 详情层 > 正常层）
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    handle_normal_key(k, &mut st);
+                    // [v0.4 P1#8] Idle 的 '/' 也要进过滤层，否则永远进不了 Typing
+                    if crate::log::routes_to_filter(&k, &st.filter_state) {
+                        handle_filter_key(k, &mut st);
+                    } else {
+                        handle_normal_key(k, &mut st);
+                    }
                 }
             }
         }
@@ -181,6 +213,7 @@ pub async fn main_loop(
                             buf.push(line);
                         }
                         budget = budget.saturating_sub(n);
+                        st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
                     }
                     Ok(StreamEvent::Ended) => {
                         st.session_states.insert(sid.clone(), SessionState::Ended);

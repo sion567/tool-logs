@@ -2,10 +2,15 @@
 
 pub mod buffer;
 pub mod color;
+pub mod filter;
 pub mod parser;
 
 pub use buffer::LogBuffer;
 pub use color::colorize;
+pub use filter::{
+    active_filter_of, matches_filter, rebuild_view, routes_to_filter, edit_backspace, edit_insert,
+    FilterMode, FilterState, LevelFilter, NO_FILTER,
+};
 pub use parser::{detect_level, parse_line};
 
 use std::collections::HashMap;
