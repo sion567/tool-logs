@@ -1,23 +1,30 @@
 //! 键盘事件 → 状态变更（§11.4 / §14）
-//! Day4：过滤层（取出式状态机）+ 级别阈值键；侧栏 Day5、详情 Day6 接入
+//! Day5：侧栏导航（Tab 聚焦/↑↓/Enter 连接或应用预设）、f 模式循环；详情 Day6 接入
 
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::app::AppState;
+use crate::app::{AppState, PendingAction, SideEntry};
 use crate::log::{
     edit_backspace, edit_insert, FilterMode, FilterState, LevelFilter,
 };
 
 /// 正常态按键。返回值无意义，状态都改在 st 上。
 pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
+    if st.sidebar.focus {
+        handle_sidebar_key(key, st);
+        return;
+    }
     // Shift+C/G 在多数终端表现为大写字符
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             st.should_quit = true;
         }
         (KeyCode::Char('C'), _) => {} // 清屏 Day7 接入
+        (KeyCode::Char('f'), _) => st.pending = Some(PendingAction::CycleMode),
+        (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect), // Day7 确认提示可加
+        (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
         (KeyCode::Char('G'), _) => jump_latest(st),
         (KeyCode::Char('g'), KeyModifiers::SHIFT) => jump_latest(st),
         (KeyCode::Char(' '), _) => {
@@ -32,12 +39,62 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('3'), _) => set_level(st, LevelFilter::Info),
         (KeyCode::Char('4'), _) => set_level(st, LevelFilter::Debug),
         (KeyCode::Char('0'), _) => set_level(st, LevelFilter::All),
+        (KeyCode::Tab, _) => {
+            st.sidebar.focus = true;
+            st.status_msg = "侧栏聚焦：↑↓ 选择，Enter 连接/应用预设，Tab 返回".into();
+        }
         (KeyCode::Up, _) => move_selection(st, -1),
         (KeyCode::Down, _) => move_selection(st, 1),
         (KeyCode::PageUp, _) => move_selection(st, -(st.viewport.height.max(1) as isize)),
         (KeyCode::PageDown, _) => move_selection(st, st.viewport.height.max(1) as isize),
         _ => {}
     }
+}
+
+/// 侧栏按键（[v0.4 三轮]：§14 "一键查询"的入口）
+fn handle_sidebar_key(key: KeyEvent, st: &mut AppState) {
+    match key.code {
+        KeyCode::Tab | KeyCode::Esc => {
+            st.sidebar.focus = false;
+            st.status_msg = String::new();
+        }
+        KeyCode::Up => sidebar_move(st, -1),
+        KeyCode::Down => sidebar_move(st, 1),
+        KeyCode::Enter => {
+            let entries = st.sidebar_entries();
+            if let Some((entry, _)) = entries.get(st.sidebar.sel) {
+                match entry {
+                    SideEntry::Source(sid) => st.pending = Some(PendingAction::Connect(sid.clone())),
+                    SideEntry::Preset(key) => {
+                        st.pending = Some(PendingAction::ApplyPreset(key.clone()))
+                    }
+                    SideEntry::Server(_) => {} // 分组头不可选
+                }
+            }
+        }
+        KeyCode::Char('q') => st.should_quit = true,
+        _ => {}
+    }
+}
+
+/// ↑↓ 在可选条目（源/预设）间移动，跳过分组头
+fn sidebar_move(st: &mut AppState, delta: isize) {
+    let entries = st.sidebar_entries();
+    let selectable: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, (e, _))| !matches!(e, SideEntry::Server(_)))
+        .map(|(i, _)| i)
+        .collect();
+    if selectable.is_empty() {
+        return;
+    }
+    let cur = match selectable.iter().position(|&i| i == st.sidebar.sel) {
+        Some(p) => p,
+        None => selectable.len().saturating_sub(1),
+    };
+    let next = (cur as isize + delta).clamp(0, selectable.len() as isize - 1) as usize;
+    st.sidebar.sel = selectable[next];
 }
 
 fn set_level(st: &mut AppState, lf: LevelFilter) {
@@ -183,5 +240,15 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
             }
             _ => st.filter_state = FilterState::Error(input), // 原样放回（外层可二次分发）
         },
+    }
+}
+
+/// 详情面板按键（Day6）
+pub fn handle_detail_key(key: KeyEvent, st: &mut AppState) {
+    match key.code {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            st.detail_panel = None; // q 关面板
+        }
+        _ => {} // c/t/p Day6 接入
     }
 }

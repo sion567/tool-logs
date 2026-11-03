@@ -45,15 +45,35 @@ fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     );
 }
 
-fn render_sidebar(frame: &mut Frame, area: ratatui::layout::Rect, _st: &AppState) {
-    // Day5：服务器树 + 源列表 + 预设（§12.1 左栏）
-    let lines = vec![
-        Line::from("服务器 / 源"),
-        Line::from(Span::styled(
-            "（Day5 接入配置）",
+fn render_sidebar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
+    // 服务器树 + 源列表 + 预设（§12.1 左栏）
+    let entries = st.sidebar_entries();
+    let mut lines = Vec::with_capacity(entries.len());
+    for (i, (entry, label)) in entries.iter().enumerate() {
+        let line = match entry {
+            crate::app::SideEntry::Server(_) => {
+                Line::from(Span::styled(label.clone(), Style::default().add_modifier(Modifier::BOLD)))
+            }
+            _ => {
+                let selected = st.sidebar.focus && i == st.sidebar.sel;
+                let style = if selected {
+                    Style::default().bg(Color::Blue).fg(Color::White)
+                } else if !st.sidebar.focus && i == st.sidebar.sel {
+                    Style::default().fg(Color::Gray)
+                } else {
+                    Style::default()
+                };
+                Line::from(Span::styled(label.clone(), style))
+            }
+        };
+        lines.push(line);
+    }
+    if !st.sidebar.focus {
+        lines.push(Line::from(Span::styled(
+            "(Tab 聚焦)",
             Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        )));
+    }
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("源")),
         area,
@@ -82,7 +102,9 @@ fn render_toolbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState)
         }
     };
     let line = Line::from(vec![
-        Span::raw("级别:"),
+        Span::raw("模式:"),
+        Span::styled(st.mode.label(), Style::default().fg(Color::Magenta)),
+        Span::raw("  级别:"),
         Span::styled(st.level_filter.label(), Style::default().fg(Color::Cyan)),
         Span::raw("  过滤:["),
         Span::styled(filter_label, filter_style),

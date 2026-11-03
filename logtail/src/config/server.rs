@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 /// [v0.3 P1#5] 具名字段 + serde 内部 tag，才能被
 /// `auth = { type = "password", password = "x" }` 这类 toml 内联表反序列化。
+/// rename_all = lowercase：config 里写的是小写 `type = "password"|"key"`。
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "lowercase")]
 pub enum AuthCfg {
     Password { password: String },
     Key { path: String, passphrase: Option<String> },

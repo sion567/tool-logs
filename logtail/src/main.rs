@@ -8,7 +8,8 @@ async fn main() -> Result<()> {
     if args.iter().any(|a| a == "--demo") {
         demo().await
     } else {
-        logtail::app::run().await
+        let config = logtail::config::load()?;
+        logtail::app::run(config).await
     }
 }
 
