@@ -1,23 +1,28 @@
-//! 入口：`--demo` 无头模式（Day2 形态：行 → parse → buffer → 末尾 40 行着色打印）。
-//! Day3 起默认进 TUI。
-
-use std::time::Duration;
+//! 入口：默认 TUI（Day3 起）；`--demo` 保留无头打印模式做冒烟。
 
 use anyhow::Result;
-use logtail::config::server::AuthCfg;
-use logtail::log::{colorize, parse_line, LogBuffer};
-use logtail::source::SourceType;
-use logtail::ssh::{connect, LogStream, StreamEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if !args.iter().any(|a| a == "--demo") {
-        eprintln!("logtail v0.4.0：目前只有 --demo 无头模式（Day3 起 TUI）");
-        eprintln!(
-            "  LOGTAIL_HOST/LOGTAIL_PORT/LOGTAIL_USER/LOGTAIL_PASS/LOGTAIL_CMD/LOGTAIL_SRC 环境变量配置目标"
-        );
-        return Ok(());
+    if args.iter().any(|a| a == "--demo") {
+        demo().await
+    } else {
+        logtail::app::run().await
+    }
+}
+
+/// 无头冒烟通道（Day2 形态）：行 → parse → buffer → 末尾 40 行着色打印
+async fn demo() -> Result<()> {
+    use std::time::Duration;
+
+    use logtail::config::server::AuthCfg;
+    use logtail::log::{colorize, parse_line, LogBuffer};
+    use logtail::source::SourceType;
+    use logtail::ssh::{connect, LogStream, StreamEvent};
+
+    fn env_or(k: &str, d: &str) -> String {
+        std::env::var(k).unwrap_or_else(|_| d.to_string())
     }
 
     let host = env_or("LOGTAIL_HOST", "192.168.1.100");
@@ -41,7 +46,6 @@ async fn main() -> Result<()> {
     let ch = sess.channel_open_session().await?;
     ch.exec(true, cmd).await?;
 
-    // [Day2] 行 → parse → buffer.push → 末尾 40 行着色打印
     let mut log = LogStream::new(ch);
     let mut buffer = LogBuffer::new(10_000);
     loop {
@@ -65,8 +69,4 @@ async fn main() -> Result<()> {
     }
     log.teardown().await;
     Ok(())
-}
-
-fn env_or(k: &str, d: &str) -> String {
-    std::env::var(k).unwrap_or_else(|_| d.to_string())
 }
