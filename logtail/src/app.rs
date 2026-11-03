@@ -47,8 +47,8 @@ pub struct ViewCache {
     pub hits: Vec<u64>,
 }
 
-/// 详情面板（§9，Day6 启用）
-#[derive(Debug, Default)]
+/// 详情面板（§9，Day6）
+#[derive(Debug, Default, Clone)]
 pub struct DetailPanel {
     pub line_no: u64,
     pub context_before: usize,
@@ -395,7 +395,8 @@ pub async fn main_loop(
                         let n = lines.len();
                         let max_lines = st.config.general.max_buffer_lines;
                         for raw in lines {
-                            let line = parse_line(raw, src_type);
+                            let mut line = parse_line(raw, src_type);
+                            line.source = sid.clone(); // 逻辑源名（§5.1 详情面板显示用）
                             // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
                             let buf = st
                                 .buffers

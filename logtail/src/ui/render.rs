@@ -27,6 +27,11 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     render_sidebar(frame, out.left, st);
     render_toolbar(frame, out.toolbar, st);
     render_logs(frame, out.log, st);
+
+    // 详情面板（Day6）：时间/级别/源/原始行/上下文±N
+    if let (Some(rect), Some(panel)) = (out.detail, st.detail_panel.clone()) {
+        render_detail(frame, rect, st, &panel);
+    }
     render_statusbar(frame, out.statusbar, st);
 }
 
@@ -223,4 +228,70 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
         Span::raw(format!("  |  {}  |  {n} 行 {hits} 匹配", st.status_msg)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
+}
+
+/// 详情面板（§12.1 底部）：时间 / 级别 / 源 / 原始行 / 上下文±N / 操作提示
+fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, panel: &crate::app::DetailPanel) {
+    let buf = st.current_buffer();
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(line) = buf.by_line_no(panel.line_no) {
+        let ts = line
+            .timestamp
+            .map(|t| t.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+            .unwrap_or_else(|| "-".into());
+        lines.push(Line::from(vec![
+            Span::styled("时间: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(ts.clone()),
+            Span::raw("   级别: "),
+            Span::styled(line.level.label().trim(), Style::default().fg(line.level.color())),
+            Span::raw(format!("   源: {}", if line.source.is_empty() { "-" } else { &line.source })),
+        ]));
+        if let Some(tid) = &line.trace_id {
+            lines.push(Line::from(vec![
+                Span::styled("trace_id: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(tid.clone(), Style::default().fg(Color::Cyan)),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("原始: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(line.raw.clone()),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "上下文 ±{}（{} - {}）:",
+                panel.context_after, panel.context_before, panel.context_after
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+        // 上下文窗口：选中行标 ▶（Day6 验收）
+        for cl in buf.context(panel.line_no, panel.context_before, panel.context_after) {
+            let marker = if cl.line_no == panel.line_no { "▶" } else { " " };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{marker} "),
+                    Style::default().fg(if cl.line_no == panel.line_no { Color::Yellow } else { Color::DarkGray }),
+                ),
+                Span::styled(cl.raw.clone(), Style::default().fg(cl.level.color())),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "该行已被淘汰（buffer 窗口外）",
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "q:关闭 c:复制 t:trace过滤 p:聚焦源",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("选中行详情 (line_no={})", panel.line_no)),
+        ),
+        area,
+    );
 }

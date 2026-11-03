@@ -47,6 +47,18 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Down, _) => move_selection(st, 1),
         (KeyCode::PageUp, _) => move_selection(st, -(st.viewport.height.max(1) as isize)),
         (KeyCode::PageDown, _) => move_selection(st, st.viewport.height.max(1) as isize),
+        // 锁定详情面板（§14）：底部展开 时间/级别/原始行/上下文±N
+        (KeyCode::Enter, _) => {
+            if let Some(no) = st.selected_line_no {
+                st.detail_panel = Some(crate::app::DetailPanel {
+                    line_no: no,
+                    context_before: 5,
+                    context_after: 5,
+                });
+            } else {
+                st.status_msg = "先 ↑↓ 选中一行再回车".into();
+            }
+        }
         _ => {}
     }
 }
@@ -243,12 +255,54 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
     }
 }
 
-/// 详情面板按键（Day6）
+/// 详情面板按键（§四 Day6：c 复制 / t trace 过滤 / p 聚焦源 / q 关面板）
 pub fn handle_detail_key(key: KeyEvent, st: &mut AppState) {
     match key.code {
         KeyCode::Char('q') | KeyCode::Esc => {
-            st.detail_panel = None; // q 关面板
+            st.detail_panel = None; // q 关面板（Esc 与过滤层的清空语义不冲突：分发顺序过滤优先）
         }
-        _ => {} // c/t/p Day6 接入
+        KeyCode::Char('c') => copy_selected(st),
+        KeyCode::Char('t') => filter_by_trace(st),
+        KeyCode::Char('p') => {
+            st.status_msg = "多 tab 同屏在 v0.5；当前会话已是单源视图".into()
+        }
+        _ => {}
+    }
+}
+
+/// `c`：复制选中行原文（§16.7 arboard；失败只提示不崩）
+fn copy_selected(st: &mut AppState) {
+    let Some(no) = st.selected_line_no else { return };
+    let Some(line) = st.current_buffer().by_line_no(no) else {
+        st.status_msg = "该行已被淘汰".into();
+        return;
+    };
+    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(line.raw.clone())) {
+        Ok(()) => st.status_msg = format!("已复制: {}", truncate_for_status(&line.raw)),
+        Err(e) => st.status_msg = format!("复制失败: {e}"),
+    }
+}
+
+/// `t`：按该行 trace_id 过滤（§14：需该行解析出 trace_id）
+fn filter_by_trace(st: &mut AppState) {
+    let tid = st
+        .selected_line_no
+        .and_then(|no| st.current_buffer().by_line_no(no))
+        .and_then(|l| l.trace_id.clone());
+    match tid {
+        Some(id) => {
+            st.filter_state = FilterState::Active(FilterMode::Text(id.clone()));
+            st.last_rebuild += 1;
+            st.status_msg = format!("按 trace 过滤: {id}");
+        }
+        None => st.status_msg = "该行没有解析出 trace_id".into(),
+    }
+}
+
+fn truncate_for_status(s: &str) -> String {
+    if s.chars().count() > 40 {
+        format!("{}…", s.chars().take(40).collect::<String>())
+    } else {
+        s.to_string()
     }
 }

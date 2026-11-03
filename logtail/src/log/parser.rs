@@ -42,6 +42,7 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
 
     line.level = detect_level(&line.raw);
     line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
+    line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
 }
 
@@ -83,6 +84,17 @@ fn extract_timestamp(text: &str) -> Option<DateTime<Utc>> {
         })
 }
 
+/// trace_id 简单抽取（§19 TODO 的最小实现）：
+/// `trace_id=abc123...` / `traceId:...` / `trace-id:...`，值取 16-64 位十六进制或 UUID。
+pub fn extract_trace_id(text: &str) -> Option<String> {
+    lazy_static::lazy_static! {
+        static ref RE: regex::Regex = regex::Regex::new(
+            r"(?i)trace[_-]?id[=:]\s*([0-9a-fA-F]{16,64}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
+        ).unwrap();
+    }
+    RE.captures(text).map(|c| c[1].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +128,15 @@ mod tests {
         let line = parse_line("2026-01-05 14:02:04 something fatal happened".into(), SourceType::File);
         assert!(line.timestamp.is_some());
         assert_eq!(line.level, LogLevel::Error);
+    }
+
+    #[test]
+    fn trace_id_抽取() {
+        let l = parse_line("req trace_id=9f8e7d6c5b4a3212 done".into(), SourceType::File);
+        assert_eq!(l.trace_id.as_deref(), Some("9f8e7d6c5b4a3212"));
+        let l2 = parse_line("TraceId: 550e8400-e29b-41d4-a716-446655440000".into(), SourceType::File);
+        assert_eq!(l2.trace_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        let l3 = parse_line("no trace here".into(), SourceType::File);
+        assert!(l3.trace_id.is_none());
     }
 }
