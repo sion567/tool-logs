@@ -133,7 +133,7 @@ fn render_toolbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState)
             (t, Style::default())
         }
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::raw("模式:"),
         Span::styled(st.mode.label(), Style::default().fg(Color::Magenta)),
         Span::raw("  级别:"),
@@ -143,7 +143,15 @@ fn render_toolbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState)
         Span::raw("]  "),
         Span::raw(regex),
         Span::raw(format!("  跟随:{follow}")),
-    ]);
+    ];
+    // [v0.6 §16.6] 远端预过滤指示（显式警示，紫红加粗）
+    if let Some(p) = &st.remote_prefilter {
+        spans.push(Span::styled(
+            format!("  远筛:{p}"),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 

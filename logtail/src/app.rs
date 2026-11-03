@@ -77,8 +77,10 @@ pub enum PendingAction {
     Connect(SourceId),
     ApplyPreset(String),
     CycleMode,
-    Reconnect,   // Day7
-    LoadEarlier, // Day7
+    Reconnect,
+    LoadEarlier,
+    /// [v0.6 §16.6] 远程预过滤开关：把当前本地过滤推到远端 | grep（再按关闭）
+    TogglePrefilter,
 }
 
 pub struct AppState {
@@ -124,6 +126,8 @@ pub struct AppState {
     /// f 键二次确认（§14 "先确认提示"）：第一次按只提示，再按才切换
     pub pending_confirm: Option<PendingAction>,
     pub cleared_before: Option<u64>, // Day7：C 清屏显示标记
+    /// [v0.6 §16.6] 远程预过滤 pattern：Some 时命令尾接 | grep -E --line-buffered
+    pub remote_prefilter: Option<String>,
     pub status_msg: String,
     pub should_quit: bool,
 }
@@ -182,6 +186,7 @@ impl AppState {
             autostart,
             pending: None,
             pending_confirm: None,
+            remote_prefilter: None,
             cleared_before: None,
             status_msg: "Tab 聚焦侧栏选源回车连接；/ 过滤".into(),
             should_quit: false,
@@ -472,6 +477,43 @@ pub async fn execute_pending(st: &mut AppState, action: PendingAction) {
             }
         }
         PendingAction::LoadEarlier => load_earlier(st).await,
+        PendingAction::TogglePrefilter => toggle_prefilter(st).await,
+    }
+}
+
+/// [v0.6 §16.6] P 键：把当前本地过滤推到远端（显式警示注入面，§16.6）。
+/// 开 = 取 Active 过滤的 pattern → 校验 → 重连（命令尾接 | grep）；关 = 清除 → 重连。
+async fn toggle_prefilter(st: &mut AppState) {
+    match st.remote_prefilter.take() {
+        Some(old) => {
+            st.status_msg = format!("远程预过滤已关闭（曾是 {old}），带宽恢复全量");
+            if let Some(sid) = st.active_source.clone() {
+                reconnect(st, &sid).await;
+            }
+        }
+        None => {
+            let pat = match st.active_filter() {
+                crate::log::FilterMode::Text(t) => t.clone(),
+                crate::log::FilterMode::Regex(_, t) => t.clone(),
+                crate::log::FilterMode::None => String::new(),
+            };
+            if pat.is_empty() {
+                st.status_msg = "先本地过滤（/ 输入回车）再按 P 推送到远端".into();
+                return;
+            }
+            match crate::source::check_pattern(&pat) {
+                Ok(()) => {
+                    st.remote_prefilter = Some(pat.clone());
+                    st.status_msg = format!(
+                        "远程预过滤开启: {pat}（远端只回传匹配行；按 P 关闭）"
+                    );
+                    if let Some(sid) = st.active_source.clone() {
+                        reconnect(st, &sid).await;
+                    }
+                }
+                Err(e) => st.status_msg = e.to_string(), // UnsafeInput，红字
+            }
+        }
     }
 }
 
@@ -551,8 +593,9 @@ async fn connect_source(st: &mut AppState, sid: &str) {
     switch_active(st, sid, "");
     let max_lines = st.config.general.max_buffer_lines;
     let mode = st.mode.clone();
+    let prefilter = st.remote_prefilter.clone();
 
-    let fut = do_connect(&srv, &sc.source, &mode);
+    let fut = do_connect(&srv, &sc.source, &mode, prefilter.as_ref());
     match tokio::time::timeout(Duration::from_secs(20), fut).await {
         Ok(Ok(sess)) => {
             st.connections.insert(sid.to_string(), sess);
@@ -593,10 +636,15 @@ async fn do_connect(
     srv: &crate::config::ServerConfig,
     src: &crate::source::LogSource,
     mode: &ModeVariant,
+    prefilter: Option<&String>,
 ) -> Result<ActiveSession> {
     let handle =
         crate::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
-    let cmd = src.to_command(mode)?;
+    let mut cmd = src.to_command(mode)?;
+    // [v0.6 §16.6] 远端预过滤：管道接在最终命令上（docker/journal/tail/command 通用）
+    if let Some(p) = prefilter {
+        cmd = crate::source::apply_prefilter(&cmd, p)?;
+    }
     let ch = handle.channel_open_session().await?;
     ch.exec(true, cmd).await?;
     let (sess, _jh) = ActiveSession::spawn(handle, crate::ssh::LogStream::new(ch));

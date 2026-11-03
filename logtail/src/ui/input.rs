@@ -35,7 +35,8 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
                 st.status_msg = "再按 f 确认切换模式（将重建会话）".into();
             }
         }
-        (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect), // Day7 确认提示可加
+        (KeyCode::Char('P'), _) => st.pending = Some(PendingAction::TogglePrefilter), // [v0.6]
+        (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect),
         (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
         (KeyCode::Char('G'), _) => jump_latest(st),
         (KeyCode::Char('g'), KeyModifiers::SHIFT) => jump_latest(st),

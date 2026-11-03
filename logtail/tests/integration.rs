@@ -45,34 +45,46 @@ impl Handler for TestServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let cmd = String::from_utf8_lossy(data).to_string();
-        if cmd.contains("docker logs") {
+        // [v0.6] 模拟服务端 grep：命令带 `| grep -E --line-buffered '<pat>'` 时，
+        // 只回传匹配行（子串匹配模拟 ERE 的常用子集）
+        let grep_pat = cmd.split("--line-buffered ").nth(1).map(|rest| {
+            rest.trim_start()
+                .trim_start_matches('\'')
+                .split('\'')
+                .next()
+                .unwrap_or("")
+                .to_string()
+        });
+        let payload: Vec<String> = if cmd.contains("docker logs") {
             // docker JSON 包壳载荷（--timestamps 前缀在 log 字段内，与真机一致）
             let p1 = r#"{"log":"2026-01-05T14:02:04.123+08:00 db error: connection refused\n","stream":"stderr","time":"2026-01-05T06:02:04.123Z"}"#;
             let p2 = r#"{"log":"plain info line\n","stream":"stdout","time":"2026-01-05T06:02:05.000Z"}"#;
-            session
-                .data(channel, CryptoVec::from_slice(format!("{p1}\n{p2}\n").as_bytes()));
+            vec![p1.to_string(), p2.to_string()]
         } else {
             match cmd.trim() {
-                "crlf" => {
-                    session
-                        .data(channel, CryptoVec::from_slice(b"hi\r\nsecond line\r\n"));
-                }
-                "big" => {
-                    // 500 行 × "big-<no>-pad…"（~40 字节），分 20 包发
-                    for chunk in 0..20usize {
-                        let mut buf = String::new();
-                        for i in 0..25usize {
-                            let no = chunk * 25 + i;
-                            buf.push_str(&format!("big-{no:04}-{}", "x".repeat(30)));
-                            buf.push('\n');
-                        }
-                        session.data(channel, CryptoVec::from_slice(buf.as_bytes()));
-                    }
-                }
-                _ => {
-                    session.data(channel, CryptoVec::from_slice(b"hi\nsecond line\n"));
-                }
+                "crlf" => vec!["hi".into(), "second line".into()],
+                "big" => (0..500usize)
+                    .map(|no| format!("big-{no:04}-{}", "x".repeat(30)))
+                    .collect(),
+                _ => vec!["hi".into(), "second line".into()],
             }
+        };
+        let payload: Vec<String> = match &grep_pat {
+            Some(pat) if !pat.is_empty() => payload
+                .into_iter()
+                .filter(|l| l.contains(pat.as_str()))
+                .collect(),
+            _ => payload,
+        };
+        if cmd.contains("big") {
+            // 500 行分 20 包发（高吞吐路径）
+            for chunk in payload.chunks(25) {
+                let buf = format!("{}\n", chunk.join("\n"));
+                session.data(channel, CryptoVec::from_slice(buf.as_bytes()));
+            }
+        } else if !payload.is_empty() {
+            let buf = format!("{}\n", payload.join("\n"));
+            session.data(channel, CryptoVec::from_slice(buf.as_bytes()));
         }
         session.eof(channel);
         session.close(channel);
@@ -405,5 +417,80 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
     let f = st.buffers.get("file-src").unwrap();
     assert_eq!(f.len(), 2);
     assert_eq!(f.by_line_no(0).unwrap().raw, "hi", "file 源原文保留");
+    Ok(())
+}
+
+/// [v0.6 §16.6] 端到端：P 键把本地过滤推到远端后，服务端只回传匹配行。
+/// 缓冲区只有 1 条 = 管道真到了远端并被模拟 grep 执行（无管道时服务端回 2 条）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()> {
+    use logtail::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail::config::server::ServerConfig;
+    use logtail::config::source_cfg::SourceConfig;
+    use logtail::config::Config;
+    use logtail::log::{FilterMode, FilterState};
+    use logtail::source::LogSource;
+
+    let port = spawn_sshd().await?;
+    let mut cfg = Config::default();
+    cfg.general.remember_last_source = false;
+    cfg.servers.push(ServerConfig {
+        name: "local".into(),
+        host: "127.0.0.1".into(),
+        port,
+        user: "tester".into(),
+        auth: AuthCfg::Password { password: "pw".into() },
+    });
+    cfg.sources.push(SourceConfig {
+        name: "docker-src".into(),
+        server: "local".into(),
+        source: LogSource::Docker {
+            container: "my-app".into(),
+            tail: 100,
+            follow: true,
+            since: None,
+            until: None,
+        },
+    });
+    let mut st = AppState::new(cfg);
+
+    // 本地过滤 "db error" → 连接（do_connect 会把远筛接进命令）
+    st.filter_state = FilterState::Active(FilterMode::Text("db error".into()));
+    st.remote_prefilter = Some("db error".into());
+    st.pending = Some(PendingAction::Connect("docker-src".into()));
+    let action = st.pending.take().unwrap();
+    execute_pending(&mut st, action).await;
+    assert_eq!(
+        st.session_states.get("docker-src"),
+        Some(&SessionState::Streaming),
+        "{}",
+        st.status_msg
+    );
+
+    // drain 到终态
+    for _ in 0..100 {
+        if st.session_states.get("docker-src") == Some(&SessionState::Ended) {
+            break;
+        }
+        if matches!(drain_session(&mut st, "docker-src", 200), DrainOutcome::Remove) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // 服务端只回了匹配行：1 条（无管道时是 2 条）——管道真到了远端并被执行
+    let buf = st.buffers.get("docker-src").unwrap();
+    assert_eq!(
+        buf.len(),
+        1,
+        "远端 grep 必须只回传匹配行，实际 {} 条",
+        buf.len()
+    );
+    assert!(buf.by_line_no(0).unwrap().raw.contains("db error: connection refused"));
+    assert_eq!(
+        st.remote_prefilter.as_deref(),
+        Some("db error"),
+        "状态保持：按 R/预设重连仍带远筛"
+    );
     Ok(())
 }

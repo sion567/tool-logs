@@ -54,6 +54,7 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 | `/` | 过滤（Enter 确认，Esc 清空，`r` 切正则） |
 | `1`/`2`/`3`/`4`/`0` | 级别阈值 Error/Warn/Info/Debug/全部（`>=` 语义） |
 | `f` | 模式循环：全量 → 快捷(1h) → 精准(近1h) |
+| `P` | 远程预过滤：把当前过滤推到远端 `\| grep` 省带宽（再按关闭，v0.6） |
 | `,` / `.` | 切换上一个/下一个已连接 tab（不拆流，v0.5） |
 | `↑↓` / `Space` / `G` | 选择行 / 暂停跟随 / 跳最新 |
 | `Enter` | 锁定详情面板（`c` 复制 `t` trace 过滤 `q` 关闭） |

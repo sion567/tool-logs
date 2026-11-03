@@ -196,6 +196,43 @@ pub fn check_time_value(s: &str) -> Result<(), LogtailError> {
     }
 }
 
+/// [v0.6 §16.6] grep pattern 白名单：正则元字符（|()[]{}.*+?^$\ 等）要放行否则 ERE 没法用，
+/// 但 shell 杀手字符仍拒绝——单引号/双引号/反引号/$/;/&，以及控制字符。
+/// （$ 在单引号内本无害，但显式拒绝可把注入面压到最小，符合不变式③"先校验再 quote"。）
+pub fn is_safe_pattern(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.chars().all(|c| {
+        c.is_alphanumeric()
+            || matches!(
+                c,
+                ' ' | '-' | '_' | '.' | ':' | '/' | ',' | '?' | '=' | '+' | '%' | '@' | '#'
+                    | '~' | '^' | '*' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '<' | '>'
+                    | '!' | '\\'
+            )
+    })
+}
+
+pub fn check_pattern(s: &str) -> Result<(), LogtailError> {
+    if is_safe_pattern(s) {
+        Ok(())
+    } else {
+        Err(LogtailError::UnsafeInput(format!("过滤 pattern 非法: {s}")))
+    }
+}
+
+/// [v0.6] 把远端预过滤接到命令尾部：`| grep -E --line-buffered '<pattern>'`。
+/// --line-buffered 防 grep 块缓冲延迟出行；-E 用 ERE（与本地 Regex 模式同语义族）。
+/// Command 源的用户自担命令同样适用（管道对任意命令成立）。
+pub fn apply_prefilter(cmd: &str, pattern: &str) -> Result<String, LogtailError> {
+    check_pattern(pattern)?;
+    Ok(format!(
+        "{cmd} | grep -E --line-buffered {}",
+        shell_quote(pattern)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -243,6 +280,27 @@ mod tests {
         assert!(check_time_value("2026-01-05 14:02:04").is_ok());
         assert!(check_time_value("30m").is_ok());
         assert!(matches!(check_time_value("x;rm"), Err(LogtailError::UnsafeInput(_))));
+    }
+
+    #[test]
+    fn pattern_白名单放行正则拒绝杀手字符() {
+        assert!(check_pattern("db error|timeout.*retry").is_ok());
+        assert!(check_pattern("ERR(?i)x").is_ok()); // ? ( ) i 放行
+        assert!(check_pattern("^\\d{3}-[A-Z]+").is_ok()); // ^ { } [ ] - 反斜杠 放行
+        assert!(matches!(check_pattern("x'; rm -rf /"), Err(LogtailError::UnsafeInput(_))));
+        assert!(matches!(check_pattern("a`id`b"), Err(LogtailError::UnsafeInput(_))));
+        assert!(matches!(check_pattern("$(id)"), Err(LogtailError::UnsafeInput(_)))); // $ 拒
+        assert!(matches!(check_pattern("a&b"), Err(LogtailError::UnsafeInput(_))));
+        assert!(matches!(check_pattern(""), Err(LogtailError::UnsafeInput(_))));
+    }
+
+    #[test]
+    fn apply_prefilter_管道引用与拒绝() {
+        let cmd = apply_prefilter("docker logs -f x", "db error").unwrap();
+        assert_eq!(cmd, "docker logs -f x | grep -E --line-buffered 'db error'");
+        // 含引号的 pattern 被白名单拒绝而非转义放行（不变式③）
+        assert!(apply_prefilter("cmd", "a'b").is_err());
+        assert!(apply_prefilter("cmd", "a;b").is_err());
     }
 
     #[test]
