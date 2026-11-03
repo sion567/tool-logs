@@ -15,7 +15,7 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     let out = layout(frame.size(), st.detail_panel.is_some());
 
     // 日志区高度记录给输入层（↑↓ 保证选中行可见需要知道窗口大小）
-    st.viewport.height = out.log.height.saturating_sub(2); // 减 Block 边框
+    st.viewport.height = out.log.height;
 
     // [v0.4 P2#2] 命中缓存：仅 last_rebuild 变化（入行/过滤变更）才全量重扫，其余帧直接复用
     if st.view_cache.built_at != st.last_rebuild {
@@ -237,11 +237,13 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     } else {
         Span::raw(st.status_msg.clone())
     };
+    // 计数放最前：窄终端截断时保住关键信息（提示语牺牲尾部）
     let line = Line::from(vec![
-        Span::styled(hint, Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{n} 行 {hits} 匹配")),
         Span::raw("  |  "),
         msg_span,
-        Span::raw(format!("  |  {n} 行 {hits} 匹配")),
+        Span::raw("  |  "),
+        Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -310,4 +312,134 @@ fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, 
         ),
         area,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// 构造带 3 行日志的测试状态（remember_last_source 关掉，避免读真实 state.toml）
+    fn test_state() -> AppState {
+        let mut cfg = crate::config::Config::default();
+        cfg.general.remember_last_source = false;
+        let mut st = AppState::new(cfg);
+        let mut buf = crate::log::LogBuffer::new(100);
+        for (lvl, raw) in [
+            (crate::log::LogLevel::Info, "start sync"),
+            (crate::log::LogLevel::Error, "db error: connection refused"),
+            (crate::log::LogLevel::Warn, "slow query 1.2s"),
+        ] {
+            let mut line = crate::log::LogLine { level: lvl, raw: raw.into(), ..Default::default() };
+            line.source = "test-src".into();
+            buf.push(line);
+        }
+        st.buffers.insert("test-src".into(), buf);
+        st.sources.insert(
+            "test-src".into(),
+            crate::config::SourceConfig {
+                name: "test-src".into(),
+                server: "local".into(),
+                source: crate::source::LogSource::File { path: "/var/log/x.log".into(), tail: 10 },
+            },
+        );
+        st.active_source = Some("test-src".into());
+        st.last_rebuild += 1; // 与真实路径一致：buffer 入行必 bump，否则缓存视为未失效
+        st
+    }
+
+    fn draw(st: &mut AppState) -> ratatui::Terminal<TestBackend> {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, st)).unwrap();
+        terminal
+    }
+
+    fn rows(t: &ratatui::Terminal<TestBackend>) -> Vec<String> {
+        let buf = t.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf.get(x, y).symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// ratatui 宽字符占 2 格且以空白填充，CJK 断言先去掉所有空格
+    fn flat(s: &str) -> String {
+        s.replace(' ', "")
+    }
+
+    #[test]
+    fn 渲染_标题侧栏日志状态栏齐全() {
+        let mut st = test_state();
+        let t = draw(&mut st);
+        let rs = rows(&t);
+        let all = rs.join("\n");
+        let f = flat(&all);
+        assert!(f.contains("远程日志查看器v0.4.0"), "标题: {all}");
+        assert!(all.contains("test-src"), "侧栏源名: {all}");
+        assert!(all.contains("db error: connection refused"), "日志行: {all}");
+        assert!(f.contains("3行3匹配"), "状态栏计数: {all}");
+    }
+
+    #[test]
+    fn 渲染_过滤命中计数与级别键生效() {
+        let mut st = test_state();
+        // 级别键 '1' → Error+：只剩 db error 行
+        crate::ui::input::handle_normal_key(
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('1'), crossterm::event::KeyModifiers::NONE),
+            &mut st,
+        );
+        let t = draw(&mut st);
+        let rs = rows(&t);
+        let all = rs.join("\n");
+        let f = flat(&all);
+        assert!(all.contains("db error"), "Error 行可见: {all}");
+        assert!(!all.contains("slow query"), "Warn 行被阈值滤掉: {all}");
+        assert!(f.contains("3行1匹配"), "状态栏计数（buffer 3 行，阈值滤后 1 匹配）: {all}");
+    }
+
+    #[test]
+    fn 渲染_过滤文本反白高亮() {
+        let mut st = test_state();
+        st.filter_state = crate::log::FilterState::Active(crate::log::FilterMode::Text("refused".into()));
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let buf = t.backend().buffer();
+        // 找到含 refused 的行，确认命中段单元格带 REVERSED
+        let mut found = false;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf.get(x, y).symbol()).collect();
+            // 只检查日志行（工具栏的 过滤:[refused] 回显不带反白）
+            if row.contains("db error:") {
+                let Some(byte_idx) = row.find("refused") else { continue };
+                found = true;
+                let x0 = row[..byte_idx].chars().count();
+                for x in x0..x0 + "refused".len() {
+                    assert!(
+                        buf.get(x as u16, y).modifier.contains(ratatui::style::Modifier::REVERSED),
+                        "y={y} 列 {x} 应反白"
+                    );
+                }
+            }
+        }
+        assert!(found, "应渲染出命中行");
+    }
+
+    #[test]
+    fn 渲染_详情面板与上下文标记() {
+        let mut st = test_state();
+        st.selected_line_no = Some(1);
+        st.detail_panel = Some(crate::app::DetailPanel { line_no: 1, context_before: 5, context_after: 5 });
+        let t = draw(&mut st);
+        let all = rows(&t).join("\n");
+        let f = flat(&all);
+        assert!(f.contains("选中行详情"), "详情面板标题: {all}");
+        assert!(all.contains("▶"), "上下文选中标记: {all}");
+        assert!(f.contains("原始:dberror"), "原始行: {all}");
+    }
 }

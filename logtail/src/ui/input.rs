@@ -102,10 +102,17 @@ fn sidebar_move(st: &mut AppState, delta: isize) {
         return;
     }
     let cur = match selectable.iter().position(|&i| i == st.sidebar.sel) {
-        Some(p) => p,
-        None => selectable.len().saturating_sub(1),
+        Some(p) => p as isize,
+        // 未落在可选条目上（初始游标 0 常是分组头）：Down 从第一个可选开始，Up 从最后一个
+        None => {
+            if delta > 0 {
+                -1
+            } else {
+                selectable.len() as isize
+            }
+        }
     };
-    let next = (cur as isize + delta).clamp(0, selectable.len() as isize - 1) as usize;
+    let next = (cur + delta).clamp(0, selectable.len() as isize - 1) as usize;
     st.sidebar.sel = selectable[next];
 }
 
@@ -316,5 +323,179 @@ fn clear_screen(st: &mut AppState) {
         st.viewport.scroll_y = 0;
         st.last_rebuild += 1;
         st.status_msg = "已清屏（连接保持）".into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use crate::app::{execute_pending, AppState, PendingAction, SideEntry};
+    use crate::config::{Config, PresetCfg, SourceConfig};
+    use crate::config::server::ServerConfig;
+    use crate::log::{FilterMode, FilterState, LevelFilter};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::collections::BTreeMap;
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn esc() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    fn test_state() -> AppState {
+        let mut cfg = Config::default();
+        cfg.general.remember_last_source = false;
+        cfg.servers.push(ServerConfig {
+            name: "local".into(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            user: "root".into(),
+            auth: crate::config::AuthCfg::Password { password: "x".into() },
+        });
+        cfg.sources.push(SourceConfig {
+            name: "prod-api".into(),
+            server: "local".into(),
+            source: crate::source::LogSource::Docker {
+                container: "my-app".into(),
+                tail: 100,
+                follow: true,
+                since: None,
+                until: None,
+            },
+        });
+        let mut presets = BTreeMap::new();
+        presets.insert(
+            "quick_error".to_string(),
+            PresetCfg {
+                name: Some("仅ERROR(1h)".into()),
+                level: Some("error".into()),
+                since: Some("1h".into()),
+            },
+        );
+        cfg.presets = presets;
+        AppState::new(cfg)
+    }
+
+    #[test]
+    fn 键盘_过滤全流程路由不断裂() {
+        let mut st = test_state();
+        // Idle 按 '/' → Typing（P1#8 路由回归）
+        handle_filter_key(key('/'), &mut st);
+        assert!(matches!(st.filter_state, FilterState::Typing { .. }));
+        // 输入 ERR 回车 → Active(Text)
+        for c in "ERR".chars() {
+            handle_filter_key(key(c), &mut st);
+        }
+        handle_filter_key(enter(), &mut st);
+        assert_eq!(
+            st.filter_state,
+            FilterState::Active(FilterMode::Text("ERR".into()))
+        );
+        // Esc 清空 → Idle
+        handle_filter_key(esc(), &mut st);
+        assert_eq!(st.filter_state, FilterState::Idle);
+        // 再按 '/' 重新进入 Typing（入口可复用）
+        handle_filter_key(key('/'), &mut st);
+        assert!(matches!(st.filter_state, FilterState::Typing { .. }));
+        // Active 态按 '/' 回显当前规则
+        handle_filter_key(esc(), &mut st); // 清空
+        handle_filter_key(key('/'), &mut st);
+        for c in "WARN".chars() {
+            handle_filter_key(key(c), &mut st);
+        }
+        handle_filter_key(enter(), &mut st);
+        handle_filter_key(key('/'), &mut st); // Active + '/' → Typing 且带原输入
+        match st.filter_state {
+            FilterState::Typing { input, cursor } => {
+                assert_eq!(input, "WARN");
+                assert_eq!(cursor, 4);
+            }
+            other => panic!("应为 Typing，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 键盘_正则错误落Error态且输入可续改() {
+        let mut st = test_state();
+        st.regex_mode = true;
+        handle_filter_key(key('/'), &mut st);
+        for c in "[unclosed".chars() {
+            handle_filter_key(key(c), &mut st);
+        }
+        handle_filter_key(enter(), &mut st);
+        assert!(matches!(st.filter_state, FilterState::Error(_)), "正则错落 Error");
+        assert!(st.status_msg.contains("正则编译失败"), "错误文案走状态栏");
+        // Esc/Enter 回 Typing 保留原输入
+        handle_filter_key(esc(), &mut st);
+        match st.filter_state {
+            FilterState::Typing { input, .. } => assert_eq!(input, "[unclosed"),
+            other => panic!("应为 Typing，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 键盘_级别阈值键() {
+        let mut st = test_state();
+        handle_normal_key(key('2'), &mut st);
+        assert_eq!(st.level_filter, LevelFilter::Warn);
+        assert!(st.last_rebuild > 0, "过滤变更必须触发视图重建");
+        handle_normal_key(key('0'), &mut st);
+        assert_eq!(st.level_filter, LevelFilter::All);
+    }
+
+    #[test]
+    fn 键盘_侧栏选择与预设应用() {
+        let mut st = test_state();
+        // Tab 聚焦侧栏
+        handle_normal_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut st);
+        assert!(st.sidebar.focus);
+        // Down → 第一个可选条目（源 prod-api）
+        handle_sidebar_key(key('j'), &mut st); // 非导航键：忽略
+        handle_sidebar_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
+        let entries = st.sidebar_entries();
+        let sel_entry = &entries[st.sidebar.sel].0;
+        assert!(matches!(sel_entry, SideEntry::Source(sid) if sid == "prod-api"), "跳过分组头落在源上");
+        // Enter → pending Connect
+        handle_sidebar_key(enter(), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::Connect(_))));
+        st.pending = None;
+        // 选中预设条目 → Enter → ApplyPreset → execute_pending 生效
+        loop {
+            handle_sidebar_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
+            if matches!(entries[st.sidebar.sel].0, SideEntry::Preset(_)) { break; }
+            assert!(st.sidebar.sel + 1 < entries.len(), "没找到预设条目");
+        }
+        handle_sidebar_key(enter(), &mut st);
+        let Some(PendingAction::ApplyPreset(k)) = st.pending.take() else {
+            panic!("应为 ApplyPreset");
+        };
+        // 异步执行（与主循环同路径）：since 变更但无激活源，跳过重连
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(execute_pending(&mut st, PendingAction::ApplyPreset(k)));
+        assert_eq!(st.level_filter, LevelFilter::Error, "预设 level 生效");
+        assert!(matches!(st.mode, crate::source::ModeVariant::Quick { .. }), "预设 since 切 Quick");
+    }
+
+    #[test]
+    fn 键盘_f键与R键走pending() {
+        let mut st = test_state();
+        handle_normal_key(key('f'), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::CycleMode)));
+        st.pending = None;
+        handle_normal_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::Reconnect)));
+        // Tab 返回日志区焦点
+        handle_normal_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut st);
+        assert!(st.sidebar.focus, "Tab 聚焦侧栏");
+        handle_sidebar_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut st);
+        assert!(!st.sidebar.focus, "Tab 再按回日志区");
     }
 }

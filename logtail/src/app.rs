@@ -339,34 +339,11 @@ pub async fn main_loop(
 
         // 1.5) 执行输入层发起的异步动作（连接/预设/模式循环）
         if let Some(action) = st.pending.take() {
-            match action {
-                PendingAction::Connect(sid) => connect_source(&mut st, &sid).await,
-                PendingAction::ApplyPreset(key) => {
-                    let preset = st.presets.iter().find(|p| p.key == key).cloned();
-                    if let Some(p) = preset {
-                        let since_changed = p.since.is_some();
-                        p.apply(&mut st);
-                        st.status_msg = format!("预设 [{}]: {}", p.name, st.mode.label());
-                        if since_changed {
-                            if let Some(sid) = st.active_source.clone() {
-                                reconnect(&mut st, &sid).await;
-                            }
-                        }
-                        st.last_rebuild += 1;
-                    }
-                }
-                PendingAction::CycleMode => cycle_mode(&mut st).await,
-                PendingAction::Reconnect => {
-                    if let Some(sid) = st.active_source.clone() {
-                        reconnect(&mut st, &sid).await;
-                    }
-                }
-                PendingAction::LoadEarlier => load_earlier(&mut st).await, // Day7
-            }
+            execute_pending(&mut st, action).await;
         }
 
         // 2) 后台收流（§13）
-        //    [v0.4 P1#4] 先快照 sid：循环内只 get_mut 窄借，remove 循环外统一删
+        //    [v0.4 P1#4] 先快照 sid：drain_session 内只 get_mut 窄借，remove 循环外统一删
         let sids: Vec<SourceId> = st.connections.keys().cloned().collect();
         let mut to_remove: Vec<SourceId> = Vec::new();
 
@@ -379,52 +356,8 @@ pub async fn main_loop(
             if state == SessionState::Ended {
                 continue; // 终态不再进分支
             }
-
-            let mut budget = MAX_LINES_PER_FRAME;
-            while budget > 0 {
-                // 窄借：try_recv 结果先取出（sess 借用随即结束），再碰 st 其它字段
-                let ev = match st.connections.get_mut(&sid) {
-                    Some(sess) => sess.rx.try_recv(),
-                    None => break,
-                };
-                match ev {
-                    Ok(StreamEvent::Lines(lines)) => {
-                        // [v0.4 P0#2] 整批全 parse 全 push，绝不丢行；
-                        // 预算按批规模扣减，大批允许一次透支，积压留给下帧
-                        let src_type = st.source_type_of(&sid);
-                        let n = lines.len();
-                        let max_lines = st.config.general.max_buffer_lines;
-                        for raw in lines {
-                            let mut line = parse_line(raw, src_type);
-                            line.source = sid.clone(); // 逻辑源名（§5.1 详情面板显示用）
-                            // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
-                            let buf = st
-                                .buffers
-                                .entry(sid.clone())
-                                .or_insert_with(|| LogBuffer::new(max_lines));
-                            buf.push(line);
-                        }
-                        // 暂停态锁定视图：新行进来把 scroll_y 顶上去，窗口末端钉住不滑
-                        if !st.following && st.active_source.as_deref() == Some(sid.as_str()) {
-                            st.viewport.scroll_y = st.viewport.scroll_y.saturating_add(n as u16);
-                        }
-                        budget = budget.saturating_sub(n);
-                        st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
-                    }
-                    Ok(StreamEvent::Ended) => {
-                        st.session_states.insert(sid.clone(), SessionState::Ended);
-                        st.following = false;
-                        st.status_msg = "远程命令已结束（按 R 重连）".into();
-                        to_remove.push(sid);
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        st.session_states.insert(sid.clone(), SessionState::Failed);
-                        to_remove.push(sid);
-                        break;
-                    }
-                }
+            if let DrainOutcome::Remove = drain_session(&mut st, &sid, MAX_LINES_PER_FRAME) {
+                to_remove.push(sid);
             }
         }
         // [v0.3 P2#10] remove + 显式 disconnect（Handle Drop 兜底关连接）
@@ -444,6 +377,90 @@ pub async fn main_loop(
     }
     st.persist_state();
     Ok(())
+}
+
+/// drain_session 的结果：Remove = 会话进入终态，主循环需移除连接
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DrainOutcome {
+    Continue,
+    Remove,
+}
+
+/// 执行输入层发起的挂起动作（main_loop 与测试共用）
+pub async fn execute_pending(st: &mut AppState, action: PendingAction) {
+    match action {
+        PendingAction::Connect(sid) => connect_source(st, &sid).await,
+        PendingAction::ApplyPreset(key) => {
+            let preset = st.presets.iter().find(|p| p.key == key).cloned();
+            if let Some(p) = preset {
+                let since_changed = p.since.is_some();
+                p.apply(st);
+                st.status_msg = format!("预设 [{}]: {}", p.name, st.mode.label());
+                if since_changed {
+                    if let Some(sid) = st.active_source.clone() {
+                        reconnect(st, &sid).await;
+                    }
+                }
+                st.last_rebuild += 1;
+            }
+        }
+        PendingAction::CycleMode => cycle_mode(st).await,
+        PendingAction::Reconnect => {
+            if let Some(sid) = st.active_source.clone() {
+                reconnect(st, &sid).await;
+            }
+        }
+        PendingAction::LoadEarlier => load_earlier(st).await,
+    }
+}
+
+/// 单个会话的每帧消化（§13 [v0.3 P2#9]）。main_loop 与测试共用。
+///
+/// [v0.4 P0#2] 整批全 parse 全 push，绝不丢行；预算按批规模扣减，大批允许一次透支。
+pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcome {
+    let mut budget = budget;
+    while budget > 0 {
+        // 窄借：try_recv 结果先取出（sess 借用随即结束），再碰 st 其它字段
+        let ev = match st.connections.get_mut(sid) {
+            Some(sess) => sess.rx.try_recv(),
+            None => return DrainOutcome::Continue,
+        };
+        match ev {
+            Ok(StreamEvent::Lines(lines)) => {
+                let src_type = st.source_type_of(&sid.to_string());
+                let n = lines.len();
+                let max_lines = st.config.general.max_buffer_lines;
+                for raw in lines {
+                    let mut line = parse_line(raw, src_type);
+                    line.source = sid.to_string(); // 逻辑源名（§5.1 详情面板显示用）
+                    // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
+                    let buf = st
+                        .buffers
+                        .entry(sid.to_string())
+                        .or_insert_with(|| LogBuffer::new(max_lines));
+                    buf.push(line);
+                }
+                // 暂停态锁定视图：新行进来把 scroll_y 顶上去，窗口末端钉住不滑
+                if !st.following && st.active_source.as_deref() == Some(sid) {
+                    st.viewport.scroll_y = st.viewport.scroll_y.saturating_add(n as u16);
+                }
+                budget = budget.saturating_sub(n);
+                st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
+            }
+            Ok(StreamEvent::Ended) => {
+                st.session_states.insert(sid.to_string(), SessionState::Ended);
+                st.following = false;
+                st.status_msg = "远程命令已结束（按 R 重连）".into();
+                return DrainOutcome::Remove;
+            }
+            Err(TryRecvError::Empty) => return DrainOutcome::Continue,
+            Err(TryRecvError::Disconnected) => {
+                st.session_states.insert(sid.to_string(), SessionState::Failed);
+                return DrainOutcome::Remove;
+            }
+        }
+    }
+    DrainOutcome::Continue
 }
 
 /// 连接一个源（已连则仅切换激活源，§四 Day5：多会话并存、切源不拆流）

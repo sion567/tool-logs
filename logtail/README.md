@@ -33,5 +33,5 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 ## 测试
 
 ```bash
-cargo test   # 27 个用例：单测 + in-process sshd 集成测试（无需真实服务器）
+cargo test   # 43 个用例：单测 + TestBackend 渲染测试 + in-process sshd 集成测试（无需真实服务器）
 ```

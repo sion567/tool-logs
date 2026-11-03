@@ -22,24 +22,33 @@ pub fn layout(area: Rect, has_detail: bool) -> LayoutOut {
         ])
         .split(body);
 
-    // 右区再分：日志区 / 详情面板（详情高度随选中动态）
-    let (log_area, detail_area) = if has_detail {
+    // 右区先分出工具栏一行（§12.1：工具栏是独立行，不能被日志覆盖），
+    // 再分日志区 / 详情面板（详情高度随选中动态）
+    let (toolbar, log_area, detail_area) = if has_detail {
         let rchunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(8),     // 日志区
-                Constraint::Length(8),  // 详情面板
+                Constraint::Length(1), // 工具栏
+                Constraint::Min(8),    // 日志区
+                Constraint::Length(8), // 详情面板
             ])
             .split(hchunks[1]);
-        (rchunks[0], Some(rchunks[1]))
+        (rchunks[0], rchunks[1], Some(rchunks[2]))
     } else {
-        (hchunks[1], None)
+        let rchunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // 工具栏
+                Constraint::Min(0),    // 日志区
+            ])
+            .split(hchunks[1]);
+        (rchunks[0], rchunks[1], None)
     };
 
     LayoutOut {
         title: chunks[0],
         left: hchunks[0],
-        toolbar: log_area, // 工具栏叠加在日志区顶部一行
+        toolbar,
         log: log_area,
         detail: detail_area,
         statusbar: chunks[2],

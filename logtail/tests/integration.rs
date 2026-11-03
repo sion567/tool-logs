@@ -45,25 +45,33 @@ impl Handler for TestServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let cmd = String::from_utf8_lossy(data).to_string();
-        match cmd.trim() {
-            "crlf" => {
-                session
-                    .data(channel, CryptoVec::from_slice(b"hi\r\nsecond line\r\n"));
-            }
-            "big" => {
-                // 500 行 × "big-<no>-pad…"（~40 字节），分 20 包发
-                for chunk in 0..20usize {
-                    let mut buf = String::new();
-                    for i in 0..25usize {
-                        let no = chunk * 25 + i;
-                        buf.push_str(&format!("big-{no:04}-{}", "x".repeat(30)));
-                        buf.push('\n');
-                    }
-                    session.data(channel, CryptoVec::from_slice(buf.as_bytes()));
+        if cmd.contains("docker logs") {
+            // docker JSON 包壳载荷（--timestamps 前缀在 log 字段内，与真机一致）
+            let p1 = r#"{"log":"2026-01-05T14:02:04.123+08:00 db error: connection refused\n","stream":"stderr","time":"2026-01-05T06:02:04.123Z"}"#;
+            let p2 = r#"{"log":"plain info line\n","stream":"stdout","time":"2026-01-05T06:02:05.000Z"}"#;
+            session
+                .data(channel, CryptoVec::from_slice(format!("{p1}\n{p2}\n").as_bytes()));
+        } else {
+            match cmd.trim() {
+                "crlf" => {
+                    session
+                        .data(channel, CryptoVec::from_slice(b"hi\r\nsecond line\r\n"));
                 }
-            }
-            _ => {
-                session.data(channel, CryptoVec::from_slice(b"hi\nsecond line\n"));
+                "big" => {
+                    // 500 行 × "big-<no>-pad…"（~40 字节），分 20 包发
+                    for chunk in 0..20usize {
+                        let mut buf = String::new();
+                        for i in 0..25usize {
+                            let no = chunk * 25 + i;
+                            buf.push_str(&format!("big-{no:04}-{}", "x".repeat(30)));
+                            buf.push('\n');
+                        }
+                        session.data(channel, CryptoVec::from_slice(buf.as_bytes()));
+                    }
+                }
+                _ => {
+                    session.data(channel, CryptoVec::from_slice(b"hi\nsecond line\n"));
+                }
             }
         }
         session.eof(channel);
@@ -222,5 +230,90 @@ async fn 泵_停止路径_收到Ended() -> anyhow::Result<()> {
         }
     }
     assert!(ended, "stop 信号必须让泵发一次 Ended");
+    Ok(())
+}
+
+/// 端到端（§3.2 数据流全链路）：config → to_command → SSH exec → 流 → parse → buffer。
+/// 验证 docker JSON 包壳在真实 channel 上被正确拆开、时间戳取包壳 time、级别/源/line_no 正确。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
+    use logtail::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail::config::server::ServerConfig;
+    use logtail::config::source_cfg::SourceConfig;
+    use logtail::config::{Config, PresetCfg};
+    use logtail::log::LogLevel;
+    use logtail::source::LogSource;
+    use std::collections::BTreeMap;
+
+    let port = spawn_sshd().await?;
+
+    let mut cfg = Config::default();
+    cfg.general.remember_last_source = false; // 测试确定性：不读真实 state.toml
+    cfg.servers.push(ServerConfig {
+        name: "local".into(),
+        host: "127.0.0.1".into(),
+        port,
+        user: "tester".into(),
+        auth: AuthCfg::Password { password: "pw".into() },
+    });
+    cfg.sources.push(SourceConfig {
+        name: "docker-src".into(),
+        server: "local".into(),
+        source: LogSource::Docker {
+            container: "my-app".into(),
+            tail: 100,
+            follow: true,
+            since: None,
+            until: None,
+        },
+    });
+    let mut presets = BTreeMap::new();
+    presets.insert(
+        "quick_error".to_string(),
+        PresetCfg {
+            name: Some("仅ERROR(1h)".into()),
+            level: Some("error".into()),
+            since: Some("1h".into()),
+        },
+    );
+    cfg.presets = presets;
+
+    let mut st = AppState::new(cfg);
+
+    // 连接（走 pending → execute_pending，与主循环同路径）
+    st.pending = Some(PendingAction::Connect("docker-src".into()));
+    let action = st.pending.take().unwrap();
+    execute_pending(&mut st, action).await;
+    assert_eq!(
+        st.session_states.get("docker-src"),
+        Some(&SessionState::Streaming),
+        "连接应成功: {}",
+        st.status_msg
+    );
+
+    // 消化到终态（drain_session 与主循环同路径）
+    for _ in 0..100 {
+        match drain_session(&mut st, "docker-src", 200) {
+            DrainOutcome::Remove => break,
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert_eq!(
+        st.session_states.get("docker-src"),
+        Some(&SessionState::Ended),
+        "服务端 EOF 后应到终态"
+    );
+
+    // buffer 内容校验
+    let buf = st.buffers.get("docker-src").expect("buffer 应随连接创建");
+    assert_eq!(buf.len(), 2, "两行 JSON 包壳应拆成两条 LogLine");
+    let l0 = buf.by_line_no(0).unwrap();
+    assert!(l0.raw.contains("db error: connection refused"), "raw={}", l0.raw);
+    assert_eq!(l0.level, LogLevel::Error);
+    assert!(l0.timestamp.is_some(), "包壳 time 必须被提取");
+    assert_eq!(l0.source, "docker-src", "逻辑源名随入栈写入");
+    let l1 = buf.by_line_no(1).unwrap();
+    assert!(l1.raw.contains("plain info line"), "raw={}", l1.raw);
+    assert_eq!(l1.level, LogLevel::Info);
     Ok(())
 }
