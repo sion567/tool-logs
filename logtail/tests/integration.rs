@@ -317,3 +317,83 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
     assert_eq!(l1.level, LogLevel::Info);
     Ok(())
 }
+
+/// 多源并发（§13 遍历所有 connections / §9 多会话并存）：
+/// 两个源同时连接（docker JSON + 普通 tail），各自 drain 到终态，buffer 互不串。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
+    use logtail::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail::config::server::ServerConfig;
+    use logtail::config::source_cfg::SourceConfig;
+    use logtail::config::Config;
+    use logtail::log::LogLevel;
+    use logtail::source::{LogSource, SourceType};
+
+    let port = spawn_sshd().await?;
+
+    let mut cfg = Config::default();
+    cfg.general.remember_last_source = false;
+    cfg.servers.push(ServerConfig {
+        name: "local".into(),
+        host: "127.0.0.1".into(),
+        port,
+        user: "tester".into(),
+        auth: AuthCfg::Password { password: "pw".into() },
+    });
+    cfg.sources.push(SourceConfig {
+        name: "docker-src".into(),
+        server: "local".into(),
+        source: LogSource::Docker {
+            container: "my-app".into(),
+            tail: 100,
+            follow: true,
+            since: None,
+            until: None,
+        },
+    });
+    cfg.sources.push(SourceConfig {
+        name: "file-src".into(),
+        server: "local".into(),
+        source: LogSource::File { path: "/var/log/x.log".into(), tail: 50 },
+    });
+
+    let mut st = AppState::new(cfg);
+    for sid in ["docker-src", "file-src"] {
+        st.pending = Some(PendingAction::Connect(sid.into()));
+        let action = st.pending.take().unwrap();
+        execute_pending(&mut st, action).await;
+    }
+    assert_eq!(st.connections.len(), 2, "两会话并存");
+    assert_eq!(st.source_type_of(&"docker-src".to_string()), SourceType::Docker);
+    assert_eq!(st.source_type_of(&"file-src".to_string()), SourceType::File);
+
+    // 两源各自 drain 到终态（对齐主循环语义：终态会话跳过，不重复 drain——
+    // 否则空队列 + 泵已退 = Disconnected，会把 Ended 翻成 Failed）
+    for _ in 0..100 {
+        let mut done = 0;
+        for sid in ["docker-src", "file-src"] {
+            if st.session_states.get(sid) == Some(&SessionState::Ended) {
+                done += 1;
+                continue;
+            }
+            if matches!(drain_session(&mut st, sid, 200), DrainOutcome::Remove) {
+                done += 1;
+            }
+        }
+        if done == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(st.session_states.get("docker-src"), Some(&SessionState::Ended));
+    assert_eq!(st.session_states.get("file-src"), Some(&SessionState::Ended));
+
+    // buffer 内容互不串
+    let d = st.buffers.get("docker-src").unwrap();
+    assert_eq!(d.len(), 2);
+    assert_eq!(d.by_line_no(0).unwrap().level, LogLevel::Error, "docker 源走了 JSON 拆壳");
+    let f = st.buffers.get("file-src").unwrap();
+    assert_eq!(f.len(), 2);
+    assert_eq!(f.by_line_no(0).unwrap().raw, "hi", "file 源原文保留");
+    Ok(())
+}

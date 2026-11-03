@@ -65,6 +65,7 @@
 `（CRLF 污染级别检测）、CRLF/超长10KB 跨块单测、集成测试扩到 5 个（高吞吐 500 行分包、泵 EOF 自退、泵停止路径）、tracing 初始化（LOGTAIL_LOG=1 写文件不污染 TUI）、clippy 清零 | 33 用例全绿 |
 | 深测 | **渲染/键盘/端到端三层补测**：TestBackend 渲染 4 例（修出**工具栏被日志覆盖**的真 bug——layout 拆独立工具栏行；修出缓存 built_at==last_rebuild==0 时不刷新的隐患——语义确认 + 测试显式 bump）、键盘 5 例（过滤全流程/正则 Error 态/级别键/侧栏预设/f&R pending）、端到端 1 例（config→to_command→SSH→docker JSON 拆壳→buffer，6 集成共）；app.rs 抽 `execute_pending`/`drain_session` 与主循环共用；release profile（thin LTO+strip）构建通过；sidebar_move 初始游标 Down 从第一个可选条目开始 | 43 用例全绿、clippy 0 |
 | 加固 | **五项收尾**：①parse_line 剥远端 ANSI 转义（§19 限制①落地，真机颜色码不再画成乱码）②Ctrl+C 全局退出（优先级高于过滤层，Typing 中也能退）③panic 钩子恢复终端（防 raw mode 卡死）④LineBuffer partial 1MB 上限（二进制垃圾丢头保尾）⑤LogBuffer new(0) 按容量 1 收敛；外加 `--version`、GitHub Actions CI（双 OS test + clippy -D warnings）、README 真机验收指南 | 47 用例全绿、clippy 0 |
+| 补遗 | **文档欠账三项落地**：①§12.1/Day3 的 Scrollbar（render_stateful_widget，thumb=视口在 hits 中的位置）②侧栏会话状态标记（●流中/⟳连接中/■结束/✗失败）③§14 f 键"先确认提示"（首按提示、再按执行，测试锁定）；新增**多源并发集成测试**（两会话并存 drain 互不串，含一个测试自身踩坑留档：终态会话重复 drain 会把 Ended 翻成 Failed——主循环有 Ended 守卫所以不受影响）；README 放入 TestBackend 真帧界面示意 | 48 用例全绿、clippy 0 |
 
 **踩坑（复现成本高，留档）**：
 1. russh 0.44 client/server `Handler` 是 `#[async_trait]`——impl 必须加同一宏，否则 E0195。
@@ -1795,7 +1796,7 @@ async fn eof_terminates_pump() {
 ## 十八、落地验证清单
 
 - [x] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）——已落地
-- [x] `cargo test` 全绿（47 个用例：41 单测 + 6 集成）——已落地
+- [x] `cargo test` 全绿（48 个用例：41 单测 + 7 集成）——已落地
 - [x] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令——已落地（TUI 交互待真机手测）
 - [x] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（front 偏移实现）——已落地
 - [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地

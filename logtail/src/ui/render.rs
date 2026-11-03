@@ -3,7 +3,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
 
 use crate::app::AppState;
@@ -181,6 +183,13 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines).scroll((scroll_y as u16, 0)), area);
+    // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置
+    let mut sb_state = ScrollbarState::new(len).position(content_start);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        area,
+        &mut sb_state,
+    );
 }
 
 /// 按 FilterMode 把原文切成 (片段, 是否命中) 序列，用于反白高亮
@@ -384,6 +393,16 @@ mod tests {
         assert!(all.contains("test-src"), "侧栏源名: {all}");
         assert!(all.contains("db error: connection refused"), "日志行: {all}");
         assert!(f.contains("3行3匹配"), "状态栏计数: {all}");
+        // 滚动条（Day3 任务项）：日志区最右列应有轨道/拇指符号
+        let buf = t.backend().buffer();
+        let right = buf.area.width - 1;
+        let sb_glyphs: Vec<String> = (4..buf.area.height - 1)
+            .map(|y| buf.get(right, y).symbol().to_string())
+            .collect();
+        assert!(
+            sb_glyphs.iter().any(|g| g == "│" || g == "█" || g == "▲" || g == "▼"),
+            "最右列应有滚动条: {sb_glyphs:?}"
+        );
     }
 
     #[test]

@@ -119,6 +119,8 @@ pub struct AppState {
     /// 启动自动连接（remember_last_source，[v0.4 三轮]），主循环首帧消化
     pub autostart: Option<SourceId>,
     pub pending: Option<PendingAction>,
+    /// f 键二次确认（§14 "先确认提示"）：第一次按只提示，再按才切换
+    pub pending_confirm: Option<PendingAction>,
     pub cleared_before: Option<u64>, // Day7：C 清屏显示标记
     pub status_msg: String,
     pub should_quit: bool,
@@ -176,6 +178,7 @@ impl AppState {
             config,
             autostart,
             pending: None,
+            pending_confirm: None,
             cleared_before: None,
             status_msg: "Tab 聚焦侧栏选源回车连接；/ 过滤".into(),
             should_quit: false,
@@ -223,7 +226,14 @@ impl AppState {
             }
         }
         for sc in &self.config.sources {
-            let marker = if self.active_source.as_deref() == Some(sc.name.as_str()) { "●" } else { " " };
+            // 会话状态标记：● 流中 / ⟳ 连接中 / ■ 已结束 / ✗ 失败 / 空白 未连接
+            let marker = match self.session_states.get(&sc.name).copied() {
+                Some(SessionState::Connecting) => "⟳",
+                Some(SessionState::Streaming) => "●",
+                Some(SessionState::Ended) => "■",
+                Some(SessionState::Failed) => "✗",
+                None => " ",
+            };
             out.push((
                 SideEntry::Source(sc.name.clone()),
                 format!("  {marker} {}", sc.name),

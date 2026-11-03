@@ -22,7 +22,16 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             st.should_quit = true;
         }
         (KeyCode::Char('C'), _) => clear_screen(st),
-        (KeyCode::Char('f'), _) => st.pending = Some(PendingAction::CycleMode),
+        (KeyCode::Char('f'), _) => {
+            // §14：切换会重建会话，先确认提示——第一次按只提示，再按才执行
+            if matches!(st.pending_confirm, Some(PendingAction::CycleMode)) {
+                st.pending_confirm = None;
+                st.pending = Some(PendingAction::CycleMode);
+            } else {
+                st.pending_confirm = Some(PendingAction::CycleMode);
+                st.status_msg = "再按 f 确认切换模式（将重建会话）".into();
+            }
+        }
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect), // Day7 确认提示可加
         (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
         (KeyCode::Char('G'), _) => jump_latest(st),
@@ -485,10 +494,17 @@ mod tests {
     }
 
     #[test]
-    fn 键盘_f键与R键走pending() {
+    fn 键盘_f键二次确认与R键走pending() {
         let mut st = test_state();
+        // 第一次 f：只提示，不执行（§14 先确认提示）
+        handle_normal_key(key('f'), &mut st);
+        assert!(st.pending.is_none(), "首按 f 不应直接执行");
+        assert!(st.pending_confirm.is_some());
+        assert!(st.status_msg.contains("再按 f"), "确认提示: {}", st.status_msg);
+        // 第二次 f：执行
         handle_normal_key(key('f'), &mut st);
         assert!(matches!(st.pending, Some(PendingAction::CycleMode)));
+        assert!(st.pending_confirm.is_none());
         st.pending = None;
         handle_normal_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &mut st);
         assert!(matches!(st.pending, Some(PendingAction::Reconnect)));
