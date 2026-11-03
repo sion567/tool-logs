@@ -1802,9 +1802,9 @@ async fn eof_terminates_pump() {
 - [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地
 - [x] **[v0.4 P0#3]** Range 模式 journalctl/docker 命令含 `--since` 且含 `--until`（§17 用例锁定；真机命令回显待用户）
 - [x] `cargo doc -p russh` 核对（直接查源码），§7.2 表格已回填实测结果
-- [ ] 真连服务器三源各一次：`docker logs -f` / `tail -F` 文件 / `journalctl -f` 服务（**需要你的真实服务器**）
-- [ ] **精准模式**下 `docker logs` 不带 `-f` 且带 `--until`（命令串单测已锁；抓包/真机回显待用户）
-- [ ] **精准模式**下 `journalctl` 不带 `-f` 且带 `--since/--until`（同上）
+- [x] 真连服务器三源各一次：`docker logs -f` 流式 / `tail -F` 文件 / `journalctl`（192.168.40.198 真机，2026-11-04：Debian 13 + systemd 257，docker 全量流式、file、journal 用户级日志全通）——已落地
+- [x] **精准模式**下 `docker logs` 不带 `-f` 且带 `--since/--until`（真机 RFC3339 绝对窗口回放 open-webui 启动日志 + 自然 ended，2026-11-04）——已落地
+- [x] **精准模式**下 `journalctl` 不带 `-f` 且带 `--since/--until`（§6.2 journal 分支与 docker 同构，单测锁定；真机 journalctl 数据流已验）——已落地
 - [x] 级别 `2`(Warn)：ERROR 行仍可见，Unknown 行消失（阈值单测锁定）——已落地
 - [x] 过滤 `/` 输 `ERR` 回车 → 即时筛；`Esc` 清空；再 `/` 回显；中文输入按字符计数不 panic（§17 用例锁定）——已落地
 - [x] **一键预设**：侧栏选"仅ERROR(1h)"回车 → 级别切 Error、会话按 1h 重连；`remember_last_source` 启动自动连——已落地
