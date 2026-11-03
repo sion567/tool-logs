@@ -16,6 +16,9 @@ pub struct LogBuffer {
 
 impl LogBuffer {
     pub fn new(max: usize) -> Self {
+        // max=0 防御：否则 push 时 len(0)>=0 触发空 pop 后仍入栈，窗口永不淘汰；
+        // 视图兜底的 EMPTY buffer 用 new(0)，按容量 1 语义收敛
+        let max = max.max(1);
         Self {
             lines: VecDeque::with_capacity(max.min(1024)),
             max,
@@ -97,6 +100,16 @@ mod tests {
         assert_eq!(b.by_line_no(no_b).unwrap().raw, "b", "淘汰后其余 no 不漂移");
         assert_eq!(b.by_line_no(no_c).unwrap().raw, "c");
         assert_eq!(b.len(), 2);
+    }
+
+    #[test]
+    fn new_0_按容量1收敛() {
+        let mut b = LogBuffer::new(0);
+        let no0 = b.push(LogLine { raw: "a".into(), ..Default::default() });
+        let no1 = b.push(LogLine { raw: "b".into(), ..Default::default() });
+        assert_eq!(b.len(), 1, "容量 1：只留最新");
+        assert!(b.by_line_no(no0).is_none());
+        assert!(b.by_line_no(no1).is_some());
     }
 
     #[test]

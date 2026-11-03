@@ -40,10 +40,23 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
         None
     };
 
+    // [§19 限制①] 远端自带的颜色码（\x1b[31m…）在 ratatui 里会按字面渲染成乱码；
+    // 级别检测/时间抽取也会被转义序列干扰。样式保留留给 anstyle-parse（v0.9），先做剥除。
+    line.raw = strip_ansi(&line.raw);
     line.level = detect_level(&line.raw);
     line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
+}
+
+/// 剥除 ANSI 转义序列：CSI（\x1b[…m 等）、OSC（\x1b]… BEL）、双字符转义
+pub fn strip_ansi(s: &str) -> String {
+    lazy_static::lazy_static! {
+        static ref RE: regex::Regex = regex::Regex::new(
+            r"\x1b(?:\[[0-9;:?<=>!]*[A-Za-z]|\][^\x07]*\x07|[@-Z\\-_])"
+        ).unwrap();
+    }
+    RE.replace_all(s, "").into_owned()
 }
 
 #[derive(Debug)]
@@ -138,5 +151,17 @@ mod tests {
         assert_eq!(l2.trace_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         let l3 = parse_line("no trace here".into(), SourceType::File);
         assert!(l3.trace_id.is_none());
+    }
+
+    #[test]
+    fn ansi_转义剥除() {
+        // §19 限制①：远端自带颜色码不能按字面进 ratatui
+        let l = parse_line("\x1b[31mERROR\x1b[0m db connection refused".into(), SourceType::File);
+        assert_eq!(l.raw, "ERROR db connection refused");
+        assert_eq!(l.level, LogLevel::Error);
+        // OSC 序列（窗口标题类）
+        assert_eq!(strip_ansi("\x1b]0;title\x07plain text"), "plain text");
+        // 正常文本不受影响
+        assert_eq!(strip_ansi("no escapes here"), "no escapes here");
     }
 }

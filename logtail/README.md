@@ -30,6 +30,12 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 | `C` / `L` / `R` | 清屏（不断连）/ 加载更早 / 重连 |
 | `q` | 退出 |
 
+## 真机验收（§18 剩余 3 条）
+
+1. **三源联测**：config.toml 配 docker / file / journalctl 三类源各一，`Tab` 聚焦侧栏逐个 `Enter` 连接，确认日志滚动、`Esc`→`R` 断开重连无残留进程
+2. **精准模式命令回显**：`f` 循环到"精准"，在远端 `ps aux | grep -E "docker logs|journalctl"` 应看到**无 `-f`** 且带 `--since/--until`；docker 与 journal 两类源都要验
+3. **缩放/ANSI/超长行**：拖动窗口大小不崩；跑一段带颜色的日志确认色码被剥掉不出现乱码；灌一条 >10KB 的栈回溯确认完整显示不截断内存不涨
+
 ## 测试
 
 ```bash

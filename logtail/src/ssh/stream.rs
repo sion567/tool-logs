@@ -49,6 +49,12 @@ impl LineBuffer {
         if start < text.len() {
             self.partial.push_str(&text[start..]);
         }
+        // 二进制垃圾防线（§18 超长行）：远端长期不发换行符时 partial 无限增长会吃内存。
+        // 超 1MB 丢头保尾——真正要看的栈回溯尾部还在，内存有界。
+        if self.partial.len() > MAX_PARTIAL {
+            let keep = self.partial.split_off(self.partial.len() - MAX_PARTIAL);
+            self.partial = keep;
+        }
         out
     }
 
@@ -61,6 +67,9 @@ impl LineBuffer {
         self.partial.is_empty()
     }
 }
+
+/// 未成行积压上限（1MB）：防二进制垃圾撑爆内存
+const MAX_PARTIAL: usize = 1 << 20;
 
 /// 命令输出流：持有读端 channel + 行缓冲。
 pub struct LogStream {
@@ -146,6 +155,19 @@ mod tests {
         let mut tail = big2.as_bytes()[5_000..].to_vec();
         tail.push(b'\n');
         assert_eq!(lb.push(&tail), vec![big2]);
+    }
+
+    #[test]
+    fn lb_无换行积压_超限丢头保尾() {
+        let mut lb = LineBuffer::default();
+        // 2MB 无换行 → partial 被限制在 1MB
+        let junk = "z".repeat(2 * 1024 * 1024);
+        assert!(lb.push(junk.as_bytes()).is_empty());
+        assert!(lb.partial().len() <= MAX_PARTIAL, "partial 必须有界: {}", lb.partial().len());
+        // 尾部数据仍在，成行后可见
+        let got = lb.push(b"tail-marker\n");
+        assert_eq!(got.len(), 1);
+        assert!(got[0].ends_with("tail-marker"));
     }
 
     #[test]

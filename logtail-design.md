@@ -64,6 +64,7 @@
 | 扫尾 | **遗漏补强**：LineBuffer 剥 `
 `（CRLF 污染级别检测）、CRLF/超长10KB 跨块单测、集成测试扩到 5 个（高吞吐 500 行分包、泵 EOF 自退、泵停止路径）、tracing 初始化（LOGTAIL_LOG=1 写文件不污染 TUI）、clippy 清零 | 33 用例全绿 |
 | 深测 | **渲染/键盘/端到端三层补测**：TestBackend 渲染 4 例（修出**工具栏被日志覆盖**的真 bug——layout 拆独立工具栏行；修出缓存 built_at==last_rebuild==0 时不刷新的隐患——语义确认 + 测试显式 bump）、键盘 5 例（过滤全流程/正则 Error 态/级别键/侧栏预设/f&R pending）、端到端 1 例（config→to_command→SSH→docker JSON 拆壳→buffer，6 集成共）；app.rs 抽 `execute_pending`/`drain_session` 与主循环共用；release profile（thin LTO+strip）构建通过；sidebar_move 初始游标 Down 从第一个可选条目开始 | 43 用例全绿、clippy 0 |
+| 加固 | **五项收尾**：①parse_line 剥远端 ANSI 转义（§19 限制①落地，真机颜色码不再画成乱码）②Ctrl+C 全局退出（优先级高于过滤层，Typing 中也能退）③panic 钩子恢复终端（防 raw mode 卡死）④LineBuffer partial 1MB 上限（二进制垃圾丢头保尾）⑤LogBuffer new(0) 按容量 1 收敛；外加 `--version`、GitHub Actions CI（双 OS test + clippy -D warnings）、README 真机验收指南 | 47 用例全绿、clippy 0 |
 
 **踩坑（复现成本高，留档）**：
 1. russh 0.44 client/server `Handler` 是 `#[async_trait]`——impl 必须加同一宏，否则 E0195。
@@ -1794,7 +1795,7 @@ async fn eof_terminates_pump() {
 ## 十八、落地验证清单
 
 - [x] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）——已落地
-- [x] `cargo test` 全绿（43 个用例：37 单测 + 6 集成）——已落地
+- [x] `cargo test` 全绿（47 个用例：41 单测 + 6 集成）——已落地
 - [x] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令——已落地（TUI 交互待真机手测）
 - [x] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（front 偏移实现）——已落地
 - [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地
@@ -1823,7 +1824,7 @@ async fn eof_terminates_pump() {
 | 日志轮转 | `tail -F` 多数 OK，极端 rename 需重盯 | 监听 inode 变化自动重开 |
 | 无持久化 | 关掉就没了 | 会话级导出 `.log`；不做长期存储 |
 | 密码明文 toml | 本地泄露风险 | 迁移系统密钥环 |
-| ANSI 混合输出 | 复杂转义可能乱 | 引入 `anstyle-parse` 分离样式与文本 |
+| ANSI 混合输出 | 复杂转义可能乱 | 已落地 `strip_ansi` 剥除（v0.4）；样式保留（远端色→ratatui 样式映射）留给 anstyle-parse |
 | 多源并发上限 | 开太多连不优雅 | 连接池 + per-source backpressure |
 | 时间解析覆盖 | 只认 RFC3339 + 常见格式 | 配置自定义时间格式串 |
 | trace_id 抽取 | 当前靠简单正则 | 来源级字段映射配置 |

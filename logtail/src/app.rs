@@ -6,7 +6,7 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use russh::Disconnect;
@@ -280,8 +280,24 @@ impl Default for AppState {
     }
 }
 
+/// Ctrl+C 是否为全局退出键（任意层生效，含过滤 Typing 态）
+pub fn is_global_quit(k: &KeyEvent) -> bool {
+    k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// panic 时恢复终端：否则 raw mode + 备用屏卡死，用户 shell 直接坏掉
+fn set_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+        default_hook(info);
+    }));
+}
+
 /// TUI 入口：terminal 生命周期配对（§四 Day3）
 pub async fn run(config: Config) -> Result<()> {
+    set_panic_hook();
     let st = AppState::new(config);
     let mut terminal = setup_terminal()?;
     let res = main_loop(&mut terminal, st).await;
@@ -325,8 +341,12 @@ pub async fn main_loop(
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
+                    // Ctrl+C 全局退出（优先级高于过滤层：Typing 中也能退出，符合终端惯例）
+                    if is_global_quit(&k) {
+                        st.should_quit = true;
+                    }
                     // [v0.4 P1#8] Idle 的 '/' 也要进过滤层，否则永远进不了 Typing
-                    if crate::log::routes_to_filter(&k, &st.filter_state) {
+                    else if crate::log::routes_to_filter(&k, &st.filter_state) {
                         handle_filter_key(k, &mut st);
                     } else if st.detail_panel.is_some() {
                         crate::ui::input::handle_detail_key(k, &mut st); // Day6
@@ -598,4 +618,20 @@ fn double_duration(s: &str) -> Option<String> {
     let caps = re.captures(s)?;
     let n: u64 = caps[1].parse().ok()?;
     Some(format!("{}{}", n.saturating_mul(2), &caps[2]))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 全局退出_任意层CtrlC() {
+        let quit = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(is_global_quit(&quit));
+        // 无 CONTROL 的 'c' 不是退出（日志区 'c' 无绑定）
+        let plain = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+        assert!(!is_global_quit(&plain));
+    }
 }

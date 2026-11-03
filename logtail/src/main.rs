@@ -6,6 +6,10 @@ use anyhow::Result;
 async fn main() -> Result<()> {
     init_tracing();
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("logtail v0.4.0");
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--demo") {
         demo().await
     } else {
