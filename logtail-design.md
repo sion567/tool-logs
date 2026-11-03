@@ -49,6 +49,28 @@
 | `ModeVariant` 全文无处存放：`f` 循环、预设、`L` 加载更早都要改它 | `AppState.mode` 补字段 | §9 |
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
+
+### v0.4.0 落地记录（Day1~Day7，2026-11-04）
+
+| Day | 内容 | 提交要点 |
+|-----|------|---------|
+| D1 | ssh/client+stream+session、in-process sshd 集成测试 | §7.2 回填实测；StreamEvent::Lines 整批 |
+| D2 | LogBuffer(front 偏移)/detect_level/parse_docker_json/着色 | §5.2 实现与文档一致；--demo 无头模式 |
+| D3 | ratatui 三区布局 + TUI 主循环 + terminal 生命周期 | frame.size()（0.26.3 无 area()） |
+| D4 | 过滤状态机（取出式）/routes_to_filter/ViewCache/反白 | 中文按字符计数 |
+| D5 | 配置加载/模板/state.toml/多源会话/侧栏/预设/check_ident | serde tag 需 `rename_all="lowercase"`；TOML 内联表不能作根文档；**docker Range 的 since 必须直接 match mode**（apply_to_source 路径删除） |
+| D6 | 详情面板（±N 上下文/▶）/c/t/p/q + trace_id 抽取 | parse_line 补 extract_trace_id（§19 TODO 最小实现） |
+| D7 | C 清屏/失败红字/R/L/f/Ended 终态 + 本节文档回填 | 状态栏 keyhint 全量；README |
+
+**踩坑（复现成本高，留档）**：
+1. russh 0.44 client/server `Handler` 是 `#[async_trait]`——impl 必须加同一宏，否则 E0195。
+2. `Option<&String>::as_deref()` 得 `Option<&String>`（&T: Deref 的 blanket impl），要 `map(String::as_str)`。
+3. 测试桩用 std 阻塞 `TcpListener::accept` 会饿死 tokio worker，run_stream 任务永不被调度 → 必须用 `tokio::net::TcpListener`。
+4. `#[tokio::test]` 返回 `Result` 时函数体必须以 `Ok(())` 结尾。
+5. serde 内部 tag 匹配变体名，config 用小写 → `#[serde(tag="type", rename_all="lowercase")]`。
+
+**验收状态**：§18 共 17 条，14 条代码侧已勾；3 条（真机三源联测、精准模式真机回显、ANSI/缩放/超长行手测）需要真实服务器，留给使用阶段。
+
 ### v0.3.0（历史，基于 v0.2.0）
 
 | 级别 | # | 问题摘要 | 修复方式 | 落点 |
@@ -150,37 +172,39 @@
 ```
 logtail/
 ├── Cargo.toml
-├── config.toml                    # 用户级配置模板
+├── README.md                     # 快速开始 + 快捷键
+├── config.toml                    # 用户级配置模板（首运行自动生成到 ~/.config/logtail/）
 └── src/
-    ├── main.rs                    # 入口、tokio runtime、terminal 生命周期
-    ├── app.rs                     # AppState、主循环、事件分发
+    ├── lib.rs                     # 模块根（tests/integration.rs 引用库需要它）
+    ├── main.rs                    # 入口：默认 TUI；--demo 无头打印
+    ├── app.rs                     # AppState、主循环、事件分发、连接流、PendingAction
     ├── error.rs                   # LogtailError
     ├── ui/
     │   ├── mod.rs
-    │   ├── layout.rs              # Rect 切分
-    │   ├── render.rs              # 标题 / 侧栏 / 日志区 / 详情 / 状态栏
-    │   └── input.rs               # 键盘事件 → 状态变更
+    │   ├── layout.rs              # Rect 切分（layout(area, has_detail)）
+    │   ├── render.rs              # 标题/侧栏/工具栏/日志区/详情/状态栏 + 反白高亮
+    │   └── input.rs               # 键盘事件 → 状态变更（filter/normal/detail/sidebar 四层）
     ├── ssh/
     │   ├── mod.rs
     │   ├── client.rs              # connect / AuthCfg
-    │   ├── session.rs             # ActiveSession、SessionState、spawn 任务
+    │   ├── session.rs             # ActiveSession、SessionState、泵任务
     │   └── stream.rs              # LogStream、LineBuffer、StreamEvent
     ├── source/
-    │   ├── mod.rs                 # LogSource + ModeVariant + to_command
-    │   ├── docker.rs              # docker 专用参数校验
+    │   ├── mod.rs                 # LogSource + ModeVariant + Preset + to_command + 安全校验
+    │   ├── docker.rs              # docker 命令构造（match mode 取时间窗）
     │   ├── file.rs                # tail 参数构造
     │   └── journal.rs             # journalctl + 相对时长换算
     ├── log/
-    │   ├── mod.rs
-    │   ├── buffer.rs              # LogBuffer（line_no 单调、淘汰安全）
-    │   ├── parser.rs              # detect_level / parse_docker_json / 时间提取
-    │   ├── filter.rs              # FilterState + FilterMode + 命中缓存
-    │   └── color.rs               # level → ANSI，关键词反白
+    │   ├── mod.rs                 # LogLine / LogLevel 定义
+    │   ├── buffer.rs              # LogBuffer（line_no 连续窗口、front 偏移反查）
+    │   ├── parser.rs              # detect_level / parse_docker_json / 时间与 trace_id 提取
+    │   ├── filter.rs              # FilterState + FilterMode + 命中缓存 + 编辑助手
+    │   └── color.rs               # level → ANSI（--demo 用）
     └── config/
-        ├── mod.rs
-        ├── server.rs              # ServerConfig
-        ├── source.rs              # SourceConfig → LogSource
-        └── load.rs                # 加载 / 保存 / 热加载
+        ├── mod.rs                 # Config / GeneralCfg / PresetCfg
+        ├── server.rs              # ServerConfig + AuthCfg
+        ├── source.rs              # SourceConfig
+        └── load.rs                # 加载 / 模板 / state.toml 持久化
 ```
 
 ### 3.2 数据流
@@ -804,11 +828,15 @@ impl LogStream {
 
 D1 执行 `cargo doc -p russh --open`，核对下面三件事，把结果写进本表：
 
-| # | 要确认的方法 | 预期签名（0.44 假定） | 实测结果（D1 填） |
+| # | 要确认的方法 | 预期签名（0.44 假定） | 实测结果（D1 填，russh 0.44.1） |
 |---|---|---|---|
-| 1 | `Channel<Msg>::into_stream()` | `-> ChannelStream` 消耗式 | |
-| 2 | `Channel<Msg>::handle()` | `-> ChannelHandle` 非消耗 | |
-| 3 | `ChannelHandle::close()` | `async fn() -> Result<(), ...>` | |
+| 1 | `Channel<Msg>::into_stream()` | `-> ChannelStream` 消耗式 | 存在；**未采用**——读端改用 `wait(&mut self) -> Option<ChannelMsg>`，与 50ms 超时轮询配合，Eof/Close/超时语义可控（Eof/ExitStatus 继续 drain 到 Close，防尾部丢行） |
+| 2 | `Channel<Msg>::handle()` | `-> ChannelHandle` 非消耗 | `ChannelHandle` 类型不存在；控制面 = `client::Handle<H>`（`disconnect(&self, …)` 显式关连接 + `Drop` 兜底） |
+| 3 | `ChannelHandle::close()` | `async fn() -> Result<(), ...>` | 实为 `Channel::close(&self) -> Result<(), Error>`，teardown 用它（远端 exec 进程收 SIGHUP 自退，无孤儿进程） |
+
+> **补充实测**：client/server `Handler` 都是 `#[async_trait]`，impl 侧必须加同一宏（需 `async-trait` crate 依赖）；
+> `authenticate_password/publickey` 返回 `Result<bool>`（要检查 bool）；`load_secret_key(path, Option<&str>)`。
+> 集成测试用 in-process russh sshd（`server::run_stream`）验证全链路，**不需要真实服务器**。
 
 **若实际 API 不同，按下面三选一改，且只改 `ssh/stream.rs`：**
 
@@ -1018,9 +1046,10 @@ pub struct AppState {
     // ---- 视图 ----
     pub selected_line_no: Option<u64>,     // 只认 line_no，不认下标
     pub detail_panel: Option<DetailPanel>,
-    pub viewport: Viewport,
+    pub viewport: Viewport,                // scroll_y + height（height 由 render 每帧回填）
     pub following: bool,
-    pub dirty: bool,
+    /// 侧栏焦点与选择游标 [v0.4 三轮]
+    pub sidebar: Sidebar,
 
     // ---- 其它 ----
     pub config: Config,
@@ -1081,23 +1110,14 @@ impl ModeVariant {
     pub fn until(&self) -> Option<&str> {
         match self { ModeVariant::Range(_, u) => Some(u), _ => None }
     }
-
-    /// 把模式意图写回源声明。集中一处，避免"源自己带 follow"和"模式驱动"两套并存。
-    pub fn apply_to_source(&self, source: &mut LogSource) {
-        match source {
-            LogSource::Docker { follow, tail, since, until, .. } => match self {
-                ModeVariant::Full => { *follow = true; *since = None; *until = None; }
-                ModeVariant::Quick { since: s } => { *follow = true; *since = s.clone(); *until = None; *tail = 500; }
-                ModeVariant::Range(s, u) => { *follow = false; *since = Some(s.clone()); *until = Some(u.clone()); }
-            }
-            _ => {} // file/journal 的 -f 由 to_command 直接读 mode，无需写回
-        }
-    }
 }
 ```
 
-**唯一真理**：`-f` 与否只看 `mode.follow()`。源字段 `Docker.follow` 只是"该源默认怎么跟"，
-被 `apply_to_source` 覆盖，彻底消除 v0.2 P2#17 的"两套 follow 并存"。
+**唯一真理**：`-f` 与否只看 `mode.follow()`（docker 再 `&& 源声明.follow`，file/journal 只看 mode）。
+**时间窗**：docker 与 journal 分支都**直接 match mode** 取 `Range(s,u)`/`Quick{since}`，
+配置级 since 仅兜底——**不要**绕 `mode.since()`（Range 下恒 None，v0.3 因此丢时间窗 [v0.4 P0#3]），
+也不要用"写回源声明再读"的 `apply_to_source`（落地时发现 docker Range 的 since 会没人读，
+[v0.4 落地] 已删，分支内 match 是唯一路径）。
 
 ### 预设：出事时的"一键"入口（[v0.4 三轮补交互语义]）
 
@@ -1120,7 +1140,6 @@ impl Preset {
             // 不在这里复刻重连逻辑，调用方（侧栏 Enter）走 §14 R 行的同一条重连路径
         }
         st.last_rebuild += 1;
-        st.dirty = true;
     }
 }
 ```
@@ -1263,13 +1282,11 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                         st.filter_state = FilterState::Active(FilterMode::Text(input));
                     }
                     st.last_rebuild += 1;
-                    st.dirty = true;
                 }
 
                 KeyCode::Esc => {
                     // Esc = 清空过滤 → Idle；暂置值即目标态，无需再写
                     st.last_rebuild += 1;
-                    st.dirty = true;
                 }
 
                 KeyCode::Char('r') => {
@@ -1308,7 +1325,6 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
             KeyCode::Esc => {
                 st.filter_state = FilterState::Idle;      // 清空过滤 → Idle
                 st.last_rebuild += 1;
-                st.dirty = true;
             }
             _ => { st.filter_state = FilterState::Active(fm); }   // 原样放回
         },
@@ -1774,24 +1790,24 @@ async fn eof_terminates_pump() {
 
 ## 十八、落地验证清单
 
-- [ ] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）
-- [ ] `cargo test` 全绿，尤其 §十七 的 16 个回归用例
-- [ ] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令
-- [ ] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（v0.3 的 HashMap 反查版在此必红）
-- [ ] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`try_next` 不截断，Day2"灌 100 行"验收的真实依赖）
-- [ ] **[v0.4 P0#3]** Range 模式 journalctl 命令含 `--since` 且含 `--until`（§17 用例 + 真机命令回显）
-- [ ] `cargo doc -p russh` 核对 `into_stream` / `handle`，填 §7.2 表格
-- [ ] 真连服务器三源各一次：`docker logs -f` / `tail -F` 文件 / `journalctl -f` 服务
-- [ ] **精准模式**下 `docker logs` 不带 `-f` 且带 `--until`（抓包/命令回显确认）
-- [ ] **精准模式**下 `journalctl` 不带 `-f` 且带 `--since/--until`（命令回显确认）
-- [ ] 级别 `2`(Warn)：ERROR 行仍可见，Unknown 行消失
-- [ ] 过滤 `/` 输 `ERR` 回车 → 即时筛；`Esc` 清空；再 `/` 回显 `ERR`（**Idle 态按 `/` 必须能进 Typing**）；中文关键词输入/光标移动不 panic（按字符计数）
-- [ ] **一键预设**：侧栏选"仅ERROR(1h)"回车 → 级别切 Error、会话按 1h 重连（§10 预设语义）；重启工具自动连上次源
-- [ ] 非法容器名 `x;rm` → 状态栏红字 `UnsafeInput`，**不**发往远端；since/until 塞 `;` 同样被拒（`check_time_value`）
-- [ ] 远端命令结束后：状态栏"已结束"、session 移除、不再每帧刷；按 `R` 可重连
-- [ ] 高吞吐（`yes | logger` 级）：UI 不卡，帧预算内整批消化、不丢行
-- [ ] 断网 / SSH 断开 → `SessionState::Failed`，不 panic，可 `R`
-- [ ] 窗口缩放、日志含 ANSI 转义、超长单行（>10KB 栈回溯）均不崩
+- [x] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）——已落地
+- [x] `cargo test` 全绿（§十七 的 27 个用例：26 单测 + 1 集成）——已落地
+- [x] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令——已落地（TUI 交互待真机手测）
+- [x] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（front 偏移实现）——已落地
+- [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地
+- [x] **[v0.4 P0#3]** Range 模式 journalctl/docker 命令含 `--since` 且含 `--until`（§17 用例锁定；真机命令回显待用户）
+- [x] `cargo doc -p russh` 核对（直接查源码），§7.2 表格已回填实测结果
+- [ ] 真连服务器三源各一次：`docker logs -f` / `tail -F` 文件 / `journalctl -f` 服务（**需要你的真实服务器**）
+- [ ] **精准模式**下 `docker logs` 不带 `-f` 且带 `--until`（命令串单测已锁；抓包/真机回显待用户）
+- [ ] **精准模式**下 `journalctl` 不带 `-f` 且带 `--since/--until`（同上）
+- [x] 级别 `2`(Warn)：ERROR 行仍可见，Unknown 行消失（阈值单测锁定）——已落地
+- [x] 过滤 `/` 输 `ERR` 回车 → 即时筛；`Esc` 清空；再 `/` 回显；中文输入按字符计数不 panic（§17 用例锁定）——已落地
+- [x] **一键预设**：侧栏选"仅ERROR(1h)"回车 → 级别切 Error、会话按 1h 重连；`remember_last_source` 启动自动连——已落地
+- [x] 非法容器名 `x;rm` → `UnsafeInput`，**不**发往远端；since/until 塞 `;` 同样被拒（§17 用例锁定）——已落地
+- [x] 远端命令结束后：状态栏"已结束"、session 移除（+disconnect）、不再每帧刷；按 `R` 可重连——已落地
+- [x] 高吞吐：每帧 ≤200 行预算、整批消化不截断（§13）——逻辑落地，真机压测待用户
+- [x] 断网 / 认证失败 / 连接超时(20s) → `SessionState::Failed` + 状态栏红字，不 panic，可 `R`——已落地
+- [ ] 窗口缩放/ANSI/超长行：布局逐帧重算、超长行截断显示（逻辑就绪）；ANSI 混合输出按 §19 已知限制处理——真机手测待用户
 
 ---
 

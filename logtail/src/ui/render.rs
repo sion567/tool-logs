@@ -19,7 +19,11 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
 
     // [v0.4 P2#2] 命中缓存：仅 last_rebuild 变化（入行/过滤变更）才全量重扫，其余帧直接复用
     if st.view_cache.built_at != st.last_rebuild {
-        let hits = rebuild_view(st.current_buffer(), st.active_filter(), st.level_filter);
+        let mut hits = rebuild_view(st.current_buffer(), st.active_filter(), st.level_filter);
+        // C 清屏（Day7）：只清显示标记，line_no <= cleared_before 的行不再显示
+        if let Some(cut) = st.cleared_before {
+            hits.retain(|&no| no > cut);
+        }
         st.view_cache = crate::app::ViewCache { built_at: st.last_rebuild, hits };
     }
 
@@ -221,11 +225,23 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
 }
 
 fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
-    let hint = "q:退出 /:过滤 r:正则 1-4:级别 Space:跟随 G:最新";
+    let hint = "Tab:侧栏 q:退出 /:过滤 f:模式 R:重连 L:更早 C:清屏 1-4:级别 Space:跟随 G:最新";
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
+    // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
+    let failed = st
+        .status_msg
+        .contains("失败")
+        || st.status_msg.contains("超时");
+    let msg_span = if failed {
+        Span::styled(st.status_msg.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    } else {
+        Span::raw(st.status_msg.clone())
+    };
     let line = Line::from(vec![
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
-        Span::raw(format!("  |  {}  |  {n} 行 {hits} 匹配", st.status_msg)),
+        Span::raw("  |  "),
+        msg_span,
+        Span::raw(format!("  |  {n} 行 {hits} 匹配")),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 }

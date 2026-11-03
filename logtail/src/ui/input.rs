@@ -21,7 +21,7 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             st.should_quit = true;
         }
-        (KeyCode::Char('C'), _) => {} // 清屏 Day7 接入
+        (KeyCode::Char('C'), _) => clear_screen(st),
         (KeyCode::Char('f'), _) => st.pending = Some(PendingAction::CycleMode),
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect), // Day7 确认提示可加
         (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
@@ -304,5 +304,17 @@ fn truncate_for_status(s: &str) -> String {
         format!("{}…", s.chars().take(40).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+/// `C` 清屏（§14：只清显示标记，不断连）：记下当前末行 line_no，渲染层不再显示它之前的行
+fn clear_screen(st: &mut AppState) {
+    let last = st.current_buffer().iter().last().map(|l| l.line_no);
+    if let Some(no) = last {
+        st.cleared_before = Some(no);
+        st.selected_line_no = None;
+        st.viewport.scroll_y = 0;
+        st.last_rebuild += 1;
+        st.status_msg = "已清屏（连接保持）".into();
     }
 }
