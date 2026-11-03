@@ -22,6 +22,9 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             st.should_quit = true;
         }
         (KeyCode::Char('C'), _) => clear_screen(st),
+        // [v0.5] 多源 tab 切换：, 前一个 / . 后一个（不拆流）
+        (KeyCode::Char(','), _) => st.switch_tab(-1),
+        (KeyCode::Char('.'), _) => st.switch_tab(1),
         (KeyCode::Char('f'), _) => {
             // §14：切换会重建会话，先确认提示——第一次按只提示，再按才执行
             if matches!(st.pending_confirm, Some(PendingAction::CycleMode)) {

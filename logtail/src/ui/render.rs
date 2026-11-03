@@ -8,7 +8,7 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 
-use crate::app::AppState;
+use crate::app::{AppState, SessionState};
 use crate::log::{rebuild_view, FilterMode};
 use crate::ui::layout::layout;
 
@@ -42,14 +42,35 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
 }
 
 fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
-    let src = st.active_source.clone().unwrap_or_else(|| "未连接".into());
-    let line = Line::from(vec![
-        Span::styled(
-            "远程日志查看器 v0.4.0",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!("   ● {src}")),
-    ]);
+    // [v0.5] 标题栏放 tab 条：[源名] 按连接顺序排列，激活 tab 反白高亮，
+    // 每个带会话状态符（●流中 ⟳连接中 ■结束 ✗失败）
+    let mut spans = vec![Span::styled(
+        format!("远程日志查看器 v{}", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )];
+    if st.tabs.is_empty() {
+        spans.push(Span::raw("   未连接（Tab 聚焦侧栏选源回车）"));
+    }
+    for tab in &st.tabs {
+        let marker = match st.session_states.get(tab).copied() {
+            Some(SessionState::Connecting) => "⟳",
+            Some(SessionState::Streaming) => "●",
+            Some(SessionState::Ended) => "■",
+            Some(SessionState::Failed) => "✗",
+            None => " ",
+        };
+        let active = st.active_source.as_deref() == Some(tab.as_str());
+        let label = format!(" {marker}[{tab}] ");
+        spans.push(Span::styled(
+            label,
+            if active {
+                Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ));
+    }
+    let line = Line::from(spans);
     frame.render_widget(
         Paragraph::new(line).block(Block::default().borders(Borders::ALL)),
         area,
@@ -355,6 +376,8 @@ mod tests {
             },
         );
         st.active_source = Some("test-src".into());
+        st.tabs.push("test-src".into()); // [v0.5] tab 条需要已连接列表
+        st.session_states.insert("test-src".into(), crate::app::SessionState::Streaming);
         st.last_rebuild += 1; // 与真实路径一致：buffer 入行必 bump，否则缓存视为未失效
         st
     }
@@ -389,7 +412,10 @@ mod tests {
         let rs = rows(&t);
         let all = rs.join("\n");
         let f = flat(&all);
-        assert!(f.contains("远程日志查看器v0.4.0"), "标题: {all}");
+        assert!(
+            f.contains(&format!("远程日志查看器v{}", env!("CARGO_PKG_VERSION"))),
+            "标题: {all}"
+        );
         assert!(all.contains("test-src"), "侧栏源名: {all}");
         assert!(all.contains("db error: connection refused"), "日志行: {all}");
         assert!(f.contains("3行3匹配"), "状态栏计数: {all}");

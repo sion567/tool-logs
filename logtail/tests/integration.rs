@@ -364,6 +364,16 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
         execute_pending(&mut st, action).await;
     }
     assert_eq!(st.connections.len(), 2, "两会话并存");
+    // [v0.5] tab 切换不拆流：,/. 等价的 switch_tab 在两会话间循环。
+    // 注意：第二次 connect 的 switch_active 已把激活源切到 file-src（最后连接者）
+    assert_eq!(st.tabs.len(), 2, "连接成功即入 tab 条");
+    assert_eq!(st.active_source.as_deref(), Some("file-src"));
+    st.switch_tab(1);
+    assert_eq!(st.active_source.as_deref(), Some("docker-src"), "循环到下一个");
+    assert_eq!(st.connections.len(), 2, "切换不拆流");
+    st.switch_tab(-1);
+    assert_eq!(st.active_source.as_deref(), Some("file-src"), "反向切换");
+    assert_eq!(st.connections.len(), 2);
     assert_eq!(st.source_type_of(&"docker-src".to_string()), SourceType::Docker);
     assert_eq!(st.source_type_of(&"file-src".to_string()), SourceType::File);
 

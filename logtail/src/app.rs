@@ -86,6 +86,8 @@ pub struct AppState {
     pub connections: HashMap<SourceId, ActiveSession>,
     pub session_states: HashMap<SourceId, SessionState>,
     pub active_source: Option<SourceId>,
+    /// [v0.5] 已连接源的 tab 顺序（含 Ended 终态，切换不拆流）
+    pub tabs: Vec<SourceId>,
 
     // ---- 数据 ----
     pub buffers: HashMap<SourceId, LogBuffer>,
@@ -161,6 +163,7 @@ impl AppState {
             connections: HashMap::new(),
             session_states: HashMap::new(),
             active_source: None,
+            tabs: Vec::new(),
             buffers: HashMap::new(),
             sources,
             filter_state: crate::log::FilterState::Idle,
@@ -246,6 +249,34 @@ impl AppState {
             }
         }
         out
+    }
+
+    /// [v0.5] 在已连接 tab 间循环切换（, 前一个 / . 后一个），不拆流
+    pub fn switch_tab(&mut self, delta: isize) {
+        if self.tabs.is_empty() {
+            self.status_msg = "没有已连接的源（Tab 聚焦侧栏连接）".into();
+            return;
+        }
+        let cur = self
+            .tabs
+            .iter()
+            .position(|t| Some(t) == self.active_source.as_ref())
+            .unwrap_or(0);
+        let n = self.tabs.len() as isize;
+        let next = ((cur as isize + delta).rem_euclid(n)) as usize;
+        let sid = self.tabs[next].clone();
+        let msg = format!("已切换到 {sid}（{}/{n}）", next + 1);
+        if self.connections.contains_key(&sid) {
+            switch_active(self, &sid, &msg);
+        } else {
+            // 终态/断开的 tab：只展示存量 buffer，不重连（重连走 R）
+            self.active_source = Some(sid.clone());
+            self.selected_line_no = None;
+            self.viewport.scroll_y = 0;
+            self.cleared_before = None;
+            self.last_rebuild += 1;
+            self.status_msg = format!("查看 {sid}（已结束，按 R 重连）");
+        }
     }
 
     /// 记住当前源与模式（退出时调用）
@@ -525,6 +556,9 @@ async fn connect_source(st: &mut AppState, sid: &str) {
     match tokio::time::timeout(Duration::from_secs(20), fut).await {
         Ok(Ok(sess)) => {
             st.connections.insert(sid.to_string(), sess);
+            if !st.tabs.iter().any(|t| t == sid) {
+                st.tabs.push(sid.to_string()); // [v0.5] 新 tab
+            }
             st.buffers
                 .entry(sid.to_string())
                 .or_insert_with(|| LogBuffer::new(max_lines));
@@ -635,6 +669,56 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+
+    fn state_with_tabs() -> AppState {
+        let mut cfg = Config::default();
+        cfg.general.remember_last_source = false;
+        let mut st = AppState::new(cfg);
+        st.tabs = vec!["a".into(), "b".into(), "c".into()];
+        for t in &st.tabs {
+            st.sources.insert(
+                t.clone(),
+                crate::config::SourceConfig {
+                    name: t.clone(),
+                    server: "s".into(),
+                    source: crate::source::LogSource::File { path: "/x.log".into(), tail: 10 },
+                },
+            );
+            st.buffers.insert(t.clone(), LogBuffer::new(10));
+            st.session_states.insert(t.clone(), SessionState::Streaming);
+        }
+        st.active_source = Some("a".into());
+        st
+    }
+
+    #[test]
+    fn 切tab_循环且不拆流() {
+        let mut st = state_with_tabs();
+        // a → b → c → a（正向循环）
+        st.switch_tab(1);
+        assert_eq!(st.active_source.as_deref(), Some("b"));
+        st.switch_tab(1);
+        assert_eq!(st.active_source.as_deref(), Some("c"));
+        st.switch_tab(1);
+        assert_eq!(st.active_source.as_deref(), Some("a"));
+        // 反向：a → c
+        st.switch_tab(-1);
+        assert_eq!(st.active_source.as_deref(), Some("c"));
+        // 切换不拆流：connections 不变
+        assert_eq!(st.connections.len(), 0); // 此用例无真实会话；不拆流由集成测试覆盖
+        // 切换触发视图重建
+        assert!(st.last_rebuild > 0);
+    }
+
+    #[test]
+    fn 切tab_空tab给出提示() {
+        let mut cfg = Config::default();
+        cfg.general.remember_last_source = false;
+        let mut st = AppState::new(cfg);
+        st.switch_tab(1);
+        assert!(st.status_msg.contains("没有已连接的源"));
+        assert!(st.active_source.is_none());
+    }
 
     #[test]
     fn 全局退出_任意层CtrlC() {
