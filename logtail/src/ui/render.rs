@@ -26,7 +26,14 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
         if let Some(cut) = st.cleared_before {
             hits.retain(|&no| no > cut);
         }
-        st.view_cache = crate::app::ViewCache { built_at: st.last_rebuild, hits };
+        // [v0.7] sparkline 随命中缓存一并刷新；宽度随日志区（缩放后长度不符也重算）
+        let width = out.log.width.max(1) as usize;
+        let spark = if st.view_cache.spark.len() != width {
+            crate::app::sparkline(st.current_buffer(), width, 1)
+        } else {
+            st.view_cache.spark.clone()
+        };
+        st.view_cache = crate::app::ViewCache { built_at: st.last_rebuild, hits, spark };
     }
 
     render_title(frame, out.title, st);
@@ -263,7 +270,7 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
 }
 
 fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
-    let hint = "Tab:侧栏 q:退出 /:过滤 f:模式 R:重连 L:更早 C:清屏 1-4:级别 Space:跟随 G:最新";
+    let hint = "Tab:侧栏 q:退出 /:过滤 f:模式 R:重连 L:更早 e:导出 P:远筛 C:清屏 1-4:级别 Space:跟随 G:最新";
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
     // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
     let failed = st
@@ -365,13 +372,16 @@ mod tests {
         cfg.general.remember_last_source = false;
         let mut st = AppState::new(cfg);
         let mut buf = crate::log::LogBuffer::new(100);
-        for (lvl, raw) in [
-            (crate::log::LogLevel::Info, "start sync"),
-            (crate::log::LogLevel::Error, "db error: connection refused"),
-            (crate::log::LogLevel::Warn, "slow query 1.2s"),
-        ] {
+        let now = chrono::Utc::now();
+        let rows = [
+            (crate::log::LogLevel::Info, "start sync", 2i64),
+            (crate::log::LogLevel::Error, "db error: connection refused", 0),
+            (crate::log::LogLevel::Warn, "slow query 1.2s", 0),
+        ];
+        for (lvl, raw, ago) in rows {
             let mut line = crate::log::LogLine { level: lvl, raw: raw.into(), ..Default::default() };
             line.source = "test-src".into();
+            line.timestamp = Some(now - chrono::Duration::seconds(ago));
             buf.push(line);
         }
         st.buffers.insert("test-src".into(), buf);
@@ -437,6 +447,11 @@ mod tests {
             sb_glyphs.iter().any(|g| g == "│" || g == "█" || g == "▲" || g == "▼"),
             "最右列应有滚动条: {sb_glyphs:?}"
         );
+        // [v0.7] sparkline 行：有带时间戳的行时应有块字符
+        let spark_row = rs
+            .iter()
+            .find(|r| r.contains('▁') || r.contains('▄') || r.contains('█'));
+        assert!(spark_row.is_some(), "应有 sparkline 行: {all}");
     }
 
     #[test]

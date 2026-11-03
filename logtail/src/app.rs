@@ -40,11 +40,13 @@ pub enum SessionState {
     Failed,
 }
 
-/// [v0.4 P2#2] 命中缓存：生成时 last_rebuild 的值 + line_no 序列
+/// [v0.4 P2#2] 命中缓存：生成时 last_rebuild 的值 + line_no 序列 + 日志量 sparkline
 #[derive(Debug, Default)]
 pub struct ViewCache {
     pub built_at: u64,
     pub hits: Vec<u64>,
+    /// [v0.7] 时间轴 sparkline：按秒分桶的行数（宽度随日志区，随 rebuild 刷新）
+    pub spark: Vec<u64>,
 }
 
 /// 详情面板（§9，Day6）
@@ -81,6 +83,8 @@ pub enum PendingAction {
     LoadEarlier,
     /// [v0.6 §16.6] 远程预过滤开关：把当前本地过滤推到远端 | grep（再按关闭）
     TogglePrefilter,
+    /// [v0.7] 导出当前源会话 buffer 到 .log 文件（§19 会话级导出）
+    Export,
 }
 
 pub struct AppState {
@@ -478,7 +482,76 @@ pub async fn execute_pending(st: &mut AppState, action: PendingAction) {
         }
         PendingAction::LoadEarlier => load_earlier(st).await,
         PendingAction::TogglePrefilter => toggle_prefilter(st).await,
+        PendingAction::Export => match export_active_session(st) {
+            Ok(path) => st.status_msg = format!("已导出 {}", path.display()),
+            Err(e) => st.status_msg = format!("导出失败: {e}"),
+        },
     }
+}
+
+/// [v0.7] 导出当前激活源的整份 buffer（不是过滤后的 hits——会话存档要全量）
+pub fn export_active_session(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
+    let sid = st
+        .active_source
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("没有激活的源（Tab 聚焦侧栏连接）"))?;
+    let buf = st
+        .buffers
+        .get(&sid)
+        .ok_or_else(|| anyhow::anyhow!("该源还没有日志"))?;
+    export_session(buf, &sid, std::path::Path::new("."))
+}
+
+/// [v0.7] 会话导出：`时间戳 级别 原始行`，头部带源名与行数（§19：会话级 .log，不做长期存储）
+pub fn export_session(
+    buf: &LogBuffer,
+    sid: &str,
+    dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::fmt::Write as _;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("logtail-{sid}-{stamp}.log"));
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# logtail 会话导出 源={sid} 行数={} 时间={}",
+        buf.len(),
+        chrono::Local::now().to_rfc3339()
+    );
+    for l in buf.iter() {
+        let ts = l
+            .timestamp
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "-".into());
+        let _ = writeln!(out, "{} {:>5} {}", ts, l.level.label().trim(), l.raw);
+    }
+    std::fs::write(&path, out)?;
+    Ok(path)
+}
+
+/// [v0.7] 时间轴 sparkline：以最新带时间戳的行对齐末端，按 bucket_secs 分桶计行数。
+/// 距末端超过 width 个桶的旧行丢弃；无时间戳的行不计入。
+pub fn sparkline(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<u64> {
+    let mut end = None;
+    for l in buf.iter() {
+        if let Some(ts) = l.timestamp {
+            end = Some(match end {
+                Some(e) if e >= ts => e,
+                _ => ts,
+            });
+        }
+    }
+    let mut v = vec![0u64; width];
+    let Some(end) = end else { return v };
+    for l in buf.iter() {
+        if let Some(ts) = l.timestamp {
+            let from_end = (end - ts).num_seconds().max(0) / bucket_secs;
+            if let Some(idx) = width.checked_sub(1 + from_end as usize) {
+                v[idx] += 1;
+            }
+        }
+    }
+    v
 }
 
 /// [v0.6 §16.6] P 键：把当前本地过滤推到远端（显式警示注入面，§16.6）。
@@ -682,34 +755,53 @@ async fn cycle_mode(st: &mut AppState) {
     }
 }
 
-/// L：加载更早（since 前移，重建会话；§14，Day7 打磨入口）
+/// L：加载更早（since 前移，重建会话；§14）。[v0.7] Range 模式也支持：按窗口宽度前移。
 async fn load_earlier(st: &mut AppState) {
-    let new_since = match &st.mode {
-        ModeVariant::Full => Some("24h".to_string()),
-        ModeVariant::Quick { since } => match since.as_deref() {
-            Some(s) => double_duration(s),
-            None => Some("24h".to_string()),
-        },
-        ModeVariant::Range(_, _) => None,
-    };
-    match new_since {
-        Some(s) => {
-            st.mode = ModeVariant::Quick { since: Some(s.clone()) };
-            st.status_msg = format!("加载更早：since={s}");
+    match next_earlier_mode(&st.mode) {
+        Some(m) => {
+            let label = m.label();
+            st.mode = m;
+            st.status_msg = format!("加载更早：{label}");
             if let Some(sid) = st.active_source.clone() {
                 reconnect(st, &sid).await;
             }
         }
-        None => st.status_msg = "精准模式下请用预设指定时间窗".into(),
+        None => st.status_msg = "当前模式无法前移，请用预设指定时间窗".into(),
     }
 }
 
-/// "1h" → "2h"；"3d" → "6d"；未知格式 → "24h"
+/// [v0.7] L 键的模式前移规则（纯函数，便于测试）
+fn next_earlier_mode(mode: &ModeVariant) -> Option<ModeVariant> {
+    match mode {
+        ModeVariant::Full => Some(ModeVariant::Quick { since: Some("24h".into()) }),
+        ModeVariant::Quick { since } => match since.as_deref() {
+            Some(s) => double_duration(s).map(|d| ModeVariant::Quick { since: Some(d) }),
+            None => Some(ModeVariant::Quick { since: Some("24h".into()) }),
+        },
+        // Range(s,u)：窗口向过去平移一个窗口宽度（u 不动，s 前移 Δ）
+        ModeVariant::Range(s, u) => extend_range(s, u),
+    }
+}
+
+/// "1h" → "2h"；"3d" → "6d"；未知格式 → None
 fn double_duration(s: &str) -> Option<String> {
     let re = regex::Regex::new(r"^(\d+)([hmd])$").unwrap();
     let caps = re.captures(s)?;
     let n: u64 = caps[1].parse().ok()?;
     Some(format!("{}{}", n.saturating_mul(2), &caps[2]))
+}
+
+/// [v0.7] Range 窗口前移：s 前移 (u-s) 的时长
+fn extend_range(s: &str, u: &str) -> Option<ModeVariant> {
+    use chrono::DateTime;
+    let s_t = DateTime::parse_from_rfc3339(s).ok()?;
+    let u_t = DateTime::parse_from_rfc3339(u).ok()?;
+    let delta = u_t - s_t;
+    if delta <= chrono::Duration::zero() {
+        return None;
+    }
+    let new_s = s_t - delta;
+    Some(ModeVariant::Range(new_s.to_rfc3339(), u.to_string()))
 }
 
 #[cfg(test)]
@@ -766,6 +858,85 @@ mod tests {
         st.switch_tab(1);
         assert!(st.status_msg.contains("没有已连接的源"));
         assert!(st.active_source.is_none());
+    }
+
+    fn buf_with_ts(counts: &[(i64, u64)]) -> LogBuffer {
+        let mut b = LogBuffer::new(100);
+        let now = chrono::Utc::now();
+        for (ago, n) in counts {
+            for _ in 0..*n {
+                let mut l = crate::log::LogLine { raw: "x".into(), ..Default::default() };
+                l.timestamp = Some(now - chrono::Duration::seconds(*ago));
+                b.push(l);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn sparkline_按秒分桶_末端对齐最新() {
+        let b = buf_with_ts(&[(0, 3), (2, 5), (10, 1)]);
+        let v = sparkline(&b, 5, 1); // 覆盖 [now-5s, now]
+        assert_eq!(v[4], 3, "最新一秒 3 行");
+        assert_eq!(v[2], 5, "now-2s 桶 5 行");
+        assert_eq!(v[0], 0, "now-5s 桶为空");
+        // 无时间戳的 buffer → 全零
+        let mut b2 = LogBuffer::new(10);
+        b2.push(crate::log::LogLine { raw: "no-ts".into(), ..Default::default() });
+        assert!(sparkline(&b2, 5, 1).iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn 导出_会话日志文件格式() {
+        let mut b = LogBuffer::new(10);
+        let now = chrono::Utc::now();
+        let mut e = crate::log::LogLine { raw: "db refused".into(), level: crate::log::LogLevel::Error, ..Default::default() };
+        e.timestamp = Some(now);
+        b.push(e);
+        let mut info = crate::log::LogLine { raw: "plain line".into(), level: crate::log::LogLevel::Info, ..Default::default() };
+        info.timestamp = None; // 无时间戳行：导出用 - 占位
+        b.push(info);
+        let dir = std::env::temp_dir().join(format!("logtail-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = export_session(&b, "src-a", &dir).unwrap();
+        let content = std::fs::read_to_string(&p).unwrap();
+        assert!(content.contains("源=src-a"), "头部带源名: {content}");
+        assert!(content.contains("ERROR db refused"), "时间戳+级别+原文: {content}");
+        assert!(content.contains("-  INFO plain line"), "无时间戳行用 - 占位: {content}");
+        assert_eq!(content.lines().count(), 3, "头部+2 行");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn 加载更早_三种模式的前移规则() {
+        use chrono::DateTime;
+        // Full → Quick(24h)
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Full),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
+        ));
+        // Quick 翻倍
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Quick { since: Some("1h".into()) }),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "2h"
+        ));
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Quick { since: None }),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
+        ));
+        // Range：窗口向过去平移一个窗口宽度
+        let m = next_earlier_mode(&ModeVariant::Range(
+            "2026-11-04T02:00:00+00:00".into(),
+            "2026-11-04T03:00:00+00:00".into(),
+        ));
+        match m {
+            Some(ModeVariant::Range(s, u)) => {
+                assert_eq!(u, "2026-11-04T03:00:00+00:00", "u 不动");
+                let s_t = DateTime::parse_from_rfc3339(&s).unwrap();
+                assert_eq!(s_t, DateTime::parse_from_rfc3339("2026-11-04T01:00:00+00:00").unwrap(), "s 前移一个窗口宽度");
+            }
+            other => panic!("应为 Range，实际 {other:?}"),
+        }
     }
 
     #[test]

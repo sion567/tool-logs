@@ -36,6 +36,7 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             }
         }
         (KeyCode::Char('P'), _) => st.pending = Some(PendingAction::TogglePrefilter), // [v0.6]
+        (KeyCode::Char('e'), _) => st.pending = Some(PendingAction::Export), // [v0.7] 会话导出
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect),
         (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
         (KeyCode::Char('G'), _) => jump_latest(st),

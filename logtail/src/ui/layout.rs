@@ -23,32 +23,35 @@ pub fn layout(area: Rect, has_detail: bool) -> LayoutOut {
         .split(body);
 
     // 右区先分出工具栏一行（§12.1：工具栏是独立行，不能被日志覆盖），
-    // 再分日志区 / 详情面板（详情高度随选中动态）
-    let (toolbar, log_area, detail_area) = if has_detail {
+    // 再分 sparkline 一行（[v0.7] 日志量时间轴）、日志区 / 详情面板
+    let (toolbar, spark, log_area, detail_area) = if has_detail {
         let rchunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // 工具栏
+                Constraint::Length(1), // sparkline [v0.7]
                 Constraint::Min(8),    // 日志区
                 Constraint::Length(8), // 详情面板
             ])
             .split(hchunks[1]);
-        (rchunks[0], rchunks[1], Some(rchunks[2]))
+        (rchunks[0], rchunks[1], rchunks[2], Some(rchunks[3]))
     } else {
         let rchunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // 工具栏
+                Constraint::Length(1), // sparkline [v0.7]
                 Constraint::Min(0),    // 日志区
             ])
             .split(hchunks[1]);
-        (rchunks[0], rchunks[1], None)
+        (rchunks[0], rchunks[1], rchunks[2], None)
     };
 
     LayoutOut {
         title: chunks[0],
         left: hchunks[0],
         toolbar,
+        spark,
         log: log_area,
         detail: detail_area,
         statusbar: chunks[2],
@@ -59,6 +62,7 @@ pub struct LayoutOut {
     pub title: Rect,
     pub left: Rect,
     pub toolbar: Rect,
+    pub spark: Rect, // [v0.7] 日志量时间轴行
     pub log: Rect,
     pub detail: Option<Rect>,
     pub statusbar: Rect,
