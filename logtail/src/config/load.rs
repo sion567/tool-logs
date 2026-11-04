@@ -24,6 +24,7 @@ host = "192.168.1.100"
 port = 22
 user = "root"
 auth = { type = "key", path = "~/.ssh/id_rsa" }        # ~ 由 expand_home 展开
+# sudo = true   # 远端命令加 sudo -n 前缀（docker 归 root 时用；需配 sudoers NOPASSWD 白名单）
 
 [[servers]]
 name = "staging"
@@ -128,6 +129,32 @@ mod tests {
 
     use super::*;
     use crate::config::AuthCfg;
+
+    #[test]
+    fn sudo_开关解析() {
+        // [v0.7.7] server 级 sudo 字段：缺省 false，显式 true 生效
+        let t = r#"
+[[servers]]
+name = "s"
+host = "h"
+port = 22
+user = "u"
+auth = { type = "password", password = "x" }
+sudo = true
+"#;
+        let cfg: Config = toml::from_str(t).unwrap();
+        assert!(cfg.servers[0].sudo);
+        let cfg2: Config = toml::from_str(
+            "[[servers]]
+name='s'
+host='h'
+port=22
+user='u'
+auth={type=\"password\",password=\"x\"}",
+        )
+        .unwrap();
+        assert!(!cfg2.servers[0].sudo, "缺省 false");
+    }
 
     #[test]
     fn 模板自身可被解析() {

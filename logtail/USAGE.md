@@ -94,7 +94,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 
 | type | 字段 | 远端实际执行的命令 |
 |------|------|--------------------|
-| `docker` | `container`、`tail`、`follow`、`since`、`until` | `docker logs [-f] --tail N [--since …] [--until …] --timestamps <容器>` |
+| `docker` | `container`、`tail`、`follow`、`since`、`until` | `docker logs [-f] --tail N [--since …] [--until …] --timestamps <容器>`（server 级 `sudo = true` 时整体加 `sudo -n` 前缀） |
 | `file` | `path`、`tail` | `tail -F -n N <路径>`（精准模式无 `-F`） |
 | `journalctl` | `service`、`since` | `journalctl [-f] -u <服务> [--since/--until]`（相对时长自动换算） |
 | `command` | `cmd` | 原样执行——**危险**：跳过全部校验，自己保证安全 |

@@ -763,6 +763,11 @@ async fn do_connect(
     let handle =
         crate::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
     let mut cmd = src.to_command(mode)?;
+    // [v0.7.7] sudo 前缀（server 级开关）：`sudo -n docker logs … | grep …`——
+    // sudo 只包主命令，grep 无需提权；须在 prefilter 管道之前
+    if srv.sudo {
+        cmd = with_sudo(&cmd);
+    }
     // [v0.6 §16.6] 远端预过滤：管道接在最终命令上（docker/journal/tail/command 通用）
     if let Some(p) = prefilter {
         cmd = crate::source::apply_prefilter(&cmd, p)?;
@@ -771,6 +776,12 @@ async fn do_connect(
     ch.exec(true, cmd).await?;
     let (sess, _jh) = ActiveSession::spawn(handle, crate::ssh::LogStream::new(ch));
     Ok(sess)
+}
+
+/// [v0.7.7] `sudo -n` 前缀：纯函数便于测试。须配合远端 sudoers NOPASSWD 白名单
+/// （见 USAGE），未配置时 sudo 立即失败并把报错写进日志流，不会挂起等待密码。
+pub fn with_sudo(cmd: &str) -> String {
+    format!("sudo -n {cmd}")
 }
 
 /// R/f/预设共用的重连路径：先 shutdown 旧会话（§14）再建新

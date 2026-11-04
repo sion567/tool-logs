@@ -267,6 +267,7 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
         port,
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
+            sudo: false,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -351,6 +352,7 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
         port,
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
+            sudo: false,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -440,6 +442,7 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
         port,
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
+            sudo: false,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),

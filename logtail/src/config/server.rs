@@ -20,4 +20,9 @@ pub struct ServerConfig {
     pub port: u16,
     pub user: String,
     pub auth: AuthCfg,
+    /// [v0.7.7] 远程命令加 `sudo -n` 前缀——适用于"docker 归 root、账号不在 docker 组"的
+    /// 机器（§16 配套：服务器上配 sudoers NOPASSWD 白名单，最小权限，不给整组等效 root）。
+    /// `-n` 非交互：未配 NOPASSWD 时 sudo 直接报错进日志流，不会卡住等待密码。
+    #[serde(default)]
+    pub sudo: bool,
 }

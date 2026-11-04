@@ -50,6 +50,17 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.7.7，用户反馈）
+
+**237 机器 docker 归 root、普通用户 permission denied**——除 `usermod -aG docker` 外的第二条路径：
+
+| 内容 | 说明 | 落点 |
+|------|------|------|
+| `ServerConfig.sudo: bool`（缺省 false） | server 级开关：所有远端命令加 `sudo -n` 前缀；`-n` 非交互，未配 NOPASSWD 时立即报错进日志流不挂起 | §8、§13 |
+| 组装顺序 | `sudo` 包主命令在先，`| grep` 远筛管道在后（grep 无需提权） | §13 do_connect |
+| 配套 | 服务器上 visudo 白名单只放行 `docker logs*` / `journalctl` / `tail`——最小权限，不给整组等效 root | §16 |
+| 测试 | `sudo_前缀在管道之前`（组装顺序）、`sudo_开关解析`（缺省 false）；模板示例同步 | §17 |
+
 ## 变更记录（v0.7.6，用户反馈五项）
 
 | # | 问题 | 根因 | 修复 |

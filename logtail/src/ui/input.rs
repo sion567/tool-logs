@@ -448,6 +448,7 @@ mod tests {
             port: 22,
             user: "root".into(),
             auth: crate::config::AuthCfg::Password { password: "x".into() },
+            sudo: false,
         });
         cfg.sources.push(SourceConfig {
             name: "prod-api".into(),
