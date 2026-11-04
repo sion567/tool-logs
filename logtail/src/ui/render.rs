@@ -60,10 +60,10 @@ fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     }
     for tab in &st.tabs {
         let marker = match st.session_states.get(tab).copied() {
-            Some(SessionState::Connecting) => "⟳",
-            Some(SessionState::Streaming) => "●",
-            Some(SessionState::Ended) => "■",
-            Some(SessionState::Failed) => "✗",
+            Some(SessionState::Connecting) => "c",
+            Some(SessionState::Streaming) => "*",
+            Some(SessionState::Ended) => "x",
+            Some(SessionState::Failed) => "!",
             None => " ",
         };
         let active = st.active_source.as_deref() == Some(tab.as_str());
@@ -169,12 +169,12 @@ fn render_input(input: &str, cursor: usize) -> String {
     let mut s = String::new();
     for (i, ch) in chars.iter().enumerate() {
         if i == c {
-            s.push('▌');
+            s.push('|');
         }
         s.push(*ch);
     }
     if c >= chars.len() {
-        s.push('▌');
+        s.push('|');
     }
     s
 }
@@ -232,7 +232,11 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置
     let mut sb_state = ScrollbarState::new(len).position(start);
     frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight),
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("|"))
+            .thumb_symbol("#"),
         area,
         &mut sb_state,
     );
@@ -304,9 +308,9 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     if n == 0 && st.session_states.get(st.active_source.as_deref().unwrap_or("")) == Some(&crate::app::SessionState::Streaming) {
         extra = match &st.mode {
             crate::source::ModeVariant::Quick { since: Some(s) } => format!(
-                "  |  ⚠ 当前只回放最近 {s}，期间无日志。按 f 切全量回放全部历史，或 L 前移"
+                "  |  ! 当前只回放最近 {s}，期间无日志。按 f 切全量回放全部历史，或 L 前移"
             ),
-            _ => "  |  ⚠ 已连接但暂无日志，等待新输出…（按 L 回放更早）".into(),
+            _ => "  |  ! 已连接但暂无日志，等待新输出…（按 L 回放更早）".into(),
         };
     }
     let line = Line::from(vec![
@@ -349,7 +353,7 @@ fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, 
         // [v0.7.6] 去掉"上下文±N"标签行（信息并入 block title），±5 全部可见
         // 上下文窗口：选中行标 ▶（Day6 验收）
         for cl in buf.context(panel.line_no, panel.context_before, panel.context_after) {
-            let marker = if cl.line_no == panel.line_no { "▶" } else { " " };
+            let marker = if cl.line_no == panel.line_no { ">" } else { " " };
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{marker} "),
@@ -465,14 +469,12 @@ mod tests {
             .map(|y| buf.get(right, y).symbol().to_string())
             .collect();
         assert!(
-            sb_glyphs.iter().any(|g| g == "│" || g == "█" || g == "▲" || g == "▼"),
-            "最右列应有滚动条: {sb_glyphs:?}"
+            sb_glyphs.iter().any(|g| g == "|" || g == "#"),
+            "最右列应有 ASCII 滚动条: {sb_glyphs:?}"
         );
         // [v0.7] sparkline 行：有带时间戳的行时应有块字符
-        let spark_row = rs
-            .iter()
-            .find(|r| r.contains('▁') || r.contains('▄') || r.contains('█'));
-        assert!(spark_row.is_some(), "应有 sparkline 行: {all}");
+        let spark_row = rs.iter().find(|r| r.contains(':') && r.contains('#'));
+        assert!(spark_row.is_some(), "应有 ASCII sparkline 行: {all}");
     }
 
     #[test]
@@ -575,7 +577,7 @@ mod tests {
         let all = rows(&t).join("\n");
         let f = flat(&all);
         assert!(f.contains("选中行详情"), "详情面板标题: {all}");
-        assert!(all.contains("▶"), "上下文选中标记: {all}");
+        assert!(all.contains(">"), "上下文选中标记: {all}");
         assert!(f.contains("原始:dberror"), "原始行: {all}");
     }
 }

@@ -132,6 +132,9 @@ pub struct AppState {
     /// f 键二次确认（§14 "先确认提示"）：第一次按只提示，再按才切换
     pub pending_confirm: Option<PendingAction>,
     pub cleared_before: Option<u64>, // Day7：C 清屏显示标记
+    /// [v0.8.2] 终端错位自愈：C 键触发 terminal.clear() 全量重绘
+    /// （ratatui diff 模型在终端宽度错位后无法自愈，clear 是唯一手段）
+    pub force_redraw: bool,
     /// [v0.6 §16.6] 远程预过滤 pattern：Some 时命令尾接 | grep -E --line-buffered
     pub remote_prefilter: Option<String>,
     pub status_msg: String,
@@ -194,6 +197,7 @@ impl AppState {
             pending_confirm: None,
             remote_prefilter: None,
             cleared_before: None,
+            force_redraw: false,
             status_msg: "Tab 聚焦侧栏选源回车连接；/ 过滤".into(),
             should_quit: false,
         }
@@ -268,10 +272,10 @@ impl AppState {
     /// [v0.7.6] 侧栏源行：状态标记 + 名称（●流中 ⟳连接中 ■结束 ✗失败 空白未连接）
     fn source_row(&self, sid: &str) -> String {
         let marker = match self.session_states.get(sid).copied() {
-            Some(SessionState::Connecting) => "⟳",
-            Some(SessionState::Streaming) => "●",
-            Some(SessionState::Ended) => "■",
-            Some(SessionState::Failed) => "✗",
+            Some(SessionState::Connecting) => "c",
+            Some(SessionState::Streaming) => "*",
+            Some(SessionState::Ended) => "x",
+            Some(SessionState::Failed) => "!",
             None => " ",
         };
         format!("  {marker} {sid}")
@@ -403,6 +407,11 @@ pub async fn main_loop(
             connect_source(&mut st, &sid).await;
         }
 
+        // [v0.8.2] 终端错位自愈：C 键触发全量重绘
+        if st.force_redraw {
+            st.force_redraw = false;
+            terminal.clear()?; // [v0.8.2] 全量重绘，修终端宽度错位
+        }
         terminal.draw(|f| render(f, &mut st))?;
 
         // 1) 输入事件（§13 分发顺序：过滤层 > 详情层 > 正常层）

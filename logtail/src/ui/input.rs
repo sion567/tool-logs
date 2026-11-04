@@ -411,7 +411,8 @@ fn clear_screen(st: &mut AppState) {
         st.selected_line_no = None;
         st.viewport.scroll_y = 0;
         st.last_rebuild += 1;
-        st.status_msg = "已清屏（连接保持）".into();
+        st.force_redraw = true; // [v0.8.2] 终端错位自愈：全量重绘
+        st.status_msg = "已清屏并强制重绘（连接保持）".into();
     }
 }
 
