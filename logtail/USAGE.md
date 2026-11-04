@@ -280,6 +280,15 @@ LOGTAIL_SRC=docker \        # docker / file / journal，决定是否拆 docker J
 **Q：红字"认证被拒绝 / 认证失败"？**
 密码错，或私钥路径不对 / 带 passphrase 没填。`auth = { type = "key", path = "~/.ssh/id_rsa", passphrase = "…" }`，`~` 会自动展开。
 
+**Q：连接成功但立刻结束，日志区显示 `permission denied ... /var/run/docker.sock`？**
+当前 SSH 用户不在服务器的 `docker` 组，无权访问 docker 守护进程。在服务器上执行一次（需要服务器管理员）：
+
+```bash
+sudo usermod -aG docker <用户名> && <用户名> 重新 SSH 登录生效
+```
+
+注意：`docker` 组权限等效 root（可挂载宿主文件系统进容器），给排障账号添加属常规做法，但账号需妥善保管。验证：`groups | grep docker`。
+
 **Q：journalctl 提示 "You are currently not seeing messages from other users"？**
 当前账号不在 `adm`/`systemd-journal` 组，只能看到自己的用户级日志。`sudo usermod -aG systemd-journal <用户>` 后重新登录即可看全量（需要服务器权限）。
 
