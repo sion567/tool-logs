@@ -16,12 +16,17 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         handle_sidebar_key(key, st);
         return;
     }
-    // Shift+C/G 在多数终端表现为大写字符
+    // [v0.7.4] 工具键大小写不敏感（大写=Shift+字母 或 CapsLock 都能用），
+    // 唯一例外 r/R：r=正则切换、R=重连（大写），语义有意区分。
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             st.should_quit = true;
         }
-        (KeyCode::Char('C'), _) => clear_screen(st),
+        (KeyCode::Char('C') | KeyCode::Char('c'), m)
+            if !m.contains(KeyModifiers::CONTROL) =>
+        {
+            clear_screen(st) // 大小写都清屏；Ctrl+C 退出由上面分支优先
+        }
         // [v0.5] 多源 tab 切换：, 前一个 / . 后一个（不拆流）
         (KeyCode::Char(','), _) => st.switch_tab(-1),
         (KeyCode::Char('.'), _) => st.switch_tab(1),
@@ -35,10 +40,17 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
                 st.status_msg = "再按 f 确认切换模式（将重建会话）".into();
             }
         }
-        (KeyCode::Char('P'), _) => st.pending = Some(PendingAction::TogglePrefilter), // [v0.6]
-        (KeyCode::Char('e'), _) => st.pending = Some(PendingAction::Export), // [v0.7] 会话导出
+        (KeyCode::Char('P') | KeyCode::Char('p'), _) => {
+            st.pending = Some(PendingAction::TogglePrefilter)
+        } // [v0.6]
+        (KeyCode::Char('e') | KeyCode::Char('E'), _) => {
+            st.pending = Some(PendingAction::Export)
+        } // [v0.7]
+        // 重连保持大写 R（Shift+R / CapsLock）：小写 r 是正则切换，语义有意区分
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect),
-        (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
+        (KeyCode::Char('L') | KeyCode::Char('l'), _) => {
+            st.pending = Some(PendingAction::LoadEarlier)
+        }
         // [v0.7.2] 非编辑态 r = 正则切换（输入态里 r 是字符；输入态用 Ctrl+R）
         (KeyCode::Char('r'), KeyModifiers::NONE) => {
             st.regex_mode = !st.regex_mode;
@@ -47,8 +59,7 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
                 if st.regex_mode { "开" } else { "关" }
             );
         }
-        (KeyCode::Char('G'), _) => jump_latest(st),
-        (KeyCode::Char('g'), KeyModifiers::SHIFT) => jump_latest(st),
+        (KeyCode::Char('G') | KeyCode::Char('g'), _) => jump_latest(st),
         (KeyCode::Char(' '), _) => {
             st.following = !st.following;
             if st.following {
@@ -526,6 +537,51 @@ mod tests {
             FilterState::Typing { input, .. } => assert_eq!(input, "r"),
             other => panic!("应为 Typing，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn 键盘_工具键大小写不敏感() {
+        // [v0.7.4] 提示条写明文小写，键必须大小写都认；r/R 语义有意区分
+        let mut st = test_state();
+        let mut buf = crate::log::LogBuffer::new(10);
+        buf.push(crate::log::LogLine { raw: "x".into(), ..Default::default() }); // 清屏需要非空 buffer
+        st.buffers.insert("test".into(), buf);
+        st.active_source = Some("test".into());
+
+        // l/L 都触发回放
+        handle_normal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::LoadEarlier)));
+        st.pending = None;
+        handle_normal_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::LoadEarlier)));
+        st.pending = None;
+
+        // p/P 都触发远筛
+        handle_normal_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::TogglePrefilter)));
+        st.pending = None;
+
+        // c/c 清屏（有 buffer 才生效）
+        st.last_rebuild = 0;
+        handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &mut st);
+        assert!(st.cleared_before.is_some(), "小写 c 清屏");
+        st.cleared_before = None;
+        handle_normal_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &mut st);
+        assert!(st.cleared_before.is_some(), "大写 C 清屏");
+
+        // g/G 都跳最新（无选中时也不 panic）
+        handle_normal_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &mut st);
+
+        // r 与 R 语义区分：小写 r 切正则、大写 R 重连
+        assert!(!st.regex_mode);
+        handle_normal_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &mut st);
+        assert!(st.regex_mode, "小写 r = 正则切换");
+        st.regex_mode = false;
+        handle_normal_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), &mut st);
+        assert!(matches!(st.pending, Some(PendingAction::Reconnect)), "大写 R = 重连");
+        st.pending = None;
+        assert!(!st.regex_mode, "大写 R 不得触发正则切换");
     }
 
     #[test]

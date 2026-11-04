@@ -270,7 +270,7 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
 }
 
 fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
-    let hint = "Tab:侧栏 q:退出 /:过滤 ^R:正则 f:模式 R:重连 L:更早 e:导出 P:远筛 C:清屏 1-4:级别 Space:跟随 G:最新";
+    let hint = "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 1-4:级别 Space:跟随 g:最新";
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
     // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
     let failed = st

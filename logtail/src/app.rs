@@ -332,7 +332,8 @@ impl Default for AppState {
 
 /// Ctrl+C 是否为全局退出键（任意层生效，含过滤 Typing 态）
 pub fn is_global_quit(k: &KeyEvent) -> bool {
-    k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL)
+    matches!(k.code, KeyCode::Char('c') | KeyCode::Char('C'))
+        && k.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// panic 时恢复终端：否则 raw mode + 备用屏卡死，用户 shell 直接坏掉
@@ -396,7 +397,8 @@ pub async fn main_loop(
                         st.should_quit = true;
                     }
                     // [v0.7.2] Ctrl+R 全局切换正则：Typing 态里 r 已是普通字符，切换键只能用组合键
-                    else if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                    else if matches!(k.code, KeyCode::Char('r') | KeyCode::Char('R'))
+                        && k.modifiers.contains(KeyModifiers::CONTROL) {
                         st.regex_mode = !st.regex_mode;
                         st.status_msg = format!(
                             "正则模式: {}（Enter 落规则时生效）",
