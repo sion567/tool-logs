@@ -189,6 +189,7 @@
 logtail/
 ├── Cargo.toml
 ├── README.md                     # 快速开始 + 快捷键
+├── USAGE.md                      # 使用手册（配置详解/排障工作流/FAQ，面向使用者）
 ├── config.toml                    # 用户级配置模板（首运行自动生成到 ~/.config/logtail/）
 └── src/
     ├── lib.rs                     # 模块根（tests/integration.rs 引用库需要它）
