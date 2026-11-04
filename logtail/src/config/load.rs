@@ -109,9 +109,10 @@ fn state_path() -> PathBuf {
     config_dir().join("state.toml")
 }
 
-/// [v0.7.1] 无条件追加错误日志：panic/启动失败/配置错误都落
+/// [v0.7.1] 无条件追加日志：panic/启动失败/配置错误/启动退出轨迹都落
 /// `~/.config/logtail/logtail.log`——双击 exe 闪退时 stderr 一闪而过，这里永远有痕。
-pub fn append_error_log(msg: &str) {
+/// [v0.8.2] 闪退判据：日志有"启动"无"正常退出" = 异常退出；旧版二进制则连本文件都没有。
+pub fn append_log(msg: &str) {
     let _ = fs::create_dir_all(config_dir());
     let line = format!("[{}] {}
 ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);

@@ -16,17 +16,25 @@ async fn main() -> Result<()> {
     if args.iter().any(|a| a == "--demo") {
         demo().await
     } else {
-        match logtail::config::load() {
+        logtail::config::append_log(&format!(
+            "启动 logtail v{}（TUI，工作目录 {:?}）",
+            env!("CARGO_PKG_VERSION"),
+            std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default()
+        ));
+        let result = match logtail::config::load() {
             Ok(config) => logtail::app::run(config).await,
             Err(e) => {
                 // [v0.7.1] 启动失败也落盘：双击闪退时终端一闪而过，日志里永远有痕
-                logtail::config::append_error_log(&format!("启动失败: {e:#}"));
+                logtail::config::append_log(&format!("启动失败: {e:#}"));
                 eprintln!("启动失败（详情见 ~/.config/logtail/logtail.log）：
 {e:#}");
                 eprintln!("提示：运行 --check-config 校验配置");
                 Err(e)
             }
-        }
+        };
+        // [v0.8.2] 退出轨迹：闪退判据 = 有"启动"无"正常退出"
+        logtail::config::append_log("正常退出");
+        result
     }
 }
 
@@ -74,12 +82,13 @@ fn init_tracing() {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // [v0.8.2] 打开失败降级为无日志，不 panic（曾是可以闪退的 expect）
         .with_writer(|| {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open("logtail.log")
-                .expect("打开 logtail.log")
+                .unwrap_or_else(|_| std::fs::File::create("logtail.log").expect("日志文件完全不可写"))
         })
         .try_init();
 }
