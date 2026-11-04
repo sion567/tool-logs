@@ -28,6 +28,8 @@ pub type SourceId = String;
 #[derive(Debug, Default, Clone)]
 pub struct Viewport {
     pub scroll_y: u16,
+    /// [v0.7.6] 横向滚动列偏移（←/→ 平移，Home 复位；长行看不全的解法）
+    pub scroll_x: u16,
     pub height: u16,
 }
 
@@ -225,31 +227,34 @@ impl AppState {
 
     /// 侧栏条目（服务器树 + 每服务器下源 + 预设区），渲染与导航共用
     pub fn sidebar_entries(&self) -> Vec<(SideEntry, String)> {
+        // [v0.7.6] 树形分组：server 下缩进它的 sources（旧实现先全部 server 再全部 source，
+        // 用户反馈布局不是树）。孤儿源（引用的 server 不存在）单独成组标 ⚠。
         let mut out = Vec::new();
-        let mut servers_seen = Vec::new();
+        let mut grouped = Vec::new();
         for srv in &self.config.servers {
-            servers_seen.push(srv.name.clone());
             out.push((SideEntry::Server(srv.name.clone()), format!("▾ {}", srv.name)));
-        }
-        for sc in &self.config.sources {
-            if !servers_seen.contains(&sc.server) {
-                servers_seen.push(sc.server.clone());
-                out.push((SideEntry::Server(sc.server.clone()), format!("▾ {}（未配置）", sc.server)));
+            for sc in &self.config.sources {
+                if sc.server == srv.name {
+                    grouped.push(sc.name.clone());
+                    out.push((SideEntry::Source(sc.name.clone()), self.source_row(&sc.name)));
+                }
             }
         }
-        for sc in &self.config.sources {
-            // 会话状态标记：● 流中 / ⟳ 连接中 / ■ 已结束 / ✗ 失败 / 空白 未连接
-            let marker = match self.session_states.get(&sc.name).copied() {
-                Some(SessionState::Connecting) => "⟳",
-                Some(SessionState::Streaming) => "●",
-                Some(SessionState::Ended) => "■",
-                Some(SessionState::Failed) => "✗",
-                None => " ",
-            };
+        let orphans: Vec<&crate::config::SourceConfig> = self
+            .config
+            .sources
+            .iter()
+            .filter(|sc| !grouped.contains(&sc.name))
+            .collect();
+        if !orphans.is_empty() {
             out.push((
-                SideEntry::Source(sc.name.clone()),
-                format!("  {marker} {}", sc.name),
+                SideEntry::Server("__orphan__".into()),
+                "▾ ⚠ 服务器未配置".to_string(),
             ));
+            for sc in orphans {
+                grouped.push(sc.name.clone());
+                out.push((SideEntry::Source(sc.name.clone()), self.source_row(&sc.name)));
+            }
         }
         if !self.config.presets.is_empty() {
             out.push((SideEntry::Server("__presets__".into()), "▾ 预设".to_string()));
@@ -258,6 +263,18 @@ impl AppState {
             }
         }
         out
+    }
+
+    /// [v0.7.6] 侧栏源行：状态标记 + 名称（●流中 ⟳连接中 ■结束 ✗失败 空白未连接）
+    fn source_row(&self, sid: &str) -> String {
+        let marker = match self.session_states.get(sid).copied() {
+            Some(SessionState::Connecting) => "⟳",
+            Some(SessionState::Streaming) => "●",
+            Some(SessionState::Ended) => "■",
+            Some(SessionState::Failed) => "✗",
+            None => " ",
+        };
+        format!("  {marker} {sid}")
     }
 
     /// [v0.5] 在已连接 tab 间循环切换（, 前一个 / . 后一个），不拆流
@@ -633,6 +650,27 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
                 }
                 budget = budget.saturating_sub(n);
                 st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
+                // [v0.7.6] docker 权限拒绝检测：远端 stderr 会进日志流，识别后状态栏给修复命令
+                for l in st
+                    .buffers
+                    .entry(sid.to_string())
+                    .or_insert_with(|| LogBuffer::new(max_lines))
+                    .tail(n)
+                {
+                    if l.raw.contains("permission denied")
+                        && l.raw.contains("docker.sock")
+                    {
+                        let user = st
+                            .sources
+                            .get(sid)
+                            .and_then(|sc| st.config.servers.iter().find(|s| s.name == sc.server))
+                            .map(|s| s.user.as_str())
+                            .unwrap_or("<用户>");
+                        st.status_msg = format!(
+                            "⚠ docker 权限拒绝：在服务器上执行 sudo usermod -aG docker {user} 后重新连接"
+                        );
+                    }
+                }
             }
             Ok(StreamEvent::Ended) => {
                 st.session_states.insert(sid.to_string(), SessionState::Ended);

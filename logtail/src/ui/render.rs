@@ -181,17 +181,20 @@ fn render_input(input: &str, cursor: usize) -> String {
 
 fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     let visible = st.viewport.height as usize;
-    // [v0.4 P2#3] scroll 是 render 期 builder（纵向偏移行, 横向偏移列）。
-    // Paragraph 的 scroll 只会"向下翻"：上翻靠内容多带 scroll_y 行历史——
-    // 内容 = 末尾 visible+scroll_y 行，scroll=(scroll_y,0) 恰显示 [len-visible-scroll_y, len-scroll_y)。
+    // [v0.7.6 修复] 窗口 = hits[end-visible .. end]，end = len - scroll_y。
+    // 旧实现内容取到末尾 + scroll(scroll_y) 跳过前 scroll_y 行——两者恰好抵消，
+    // 屏幕永远显示末尾 visible 行（用户反馈"光标上去了内容不变化"的根因）。
+    // 现在精确切片，纵向 scroll 恒为 0；scroll_y 只由窗口计算表达。
     let scroll_y = if st.following { 0 } else { st.viewport.scroll_y } as usize;
     let hits = &st.view_cache.hits;
     let len = hits.len();
-    let content_start = len.saturating_sub(visible + scroll_y);
+    let end = len.saturating_sub(scroll_y);
+    let start = end.saturating_sub(visible);
+    let slice = &hits[start..end.max(start)];
 
     let fm = st.active_filter().clone();
-    let mut lines = Vec::with_capacity(visible);
-    for &no in &hits[content_start..] {
+    let mut lines = Vec::with_capacity(slice.len());
+    for &no in slice {
         let line = match st.current_buffer().by_line_no(no) {
             Some(l) => l,
             None => continue, // 已淘汰：缓存比 buffer 旧一拍，下帧重建
@@ -206,8 +209,13 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
                 base
             },
         )];
-        // 关键词反白（过滤文本高亮，§12.3）
-        for (seg, matched) in split_matches(&line.raw, &fm) {
+        // 关键词反白（过滤文本高亮，§12.3）；[v0.7.6] 横滚：raw 跳过前 scroll_x 字符
+        let raw_view: String = if st.viewport.scroll_x > 0 {
+            line.raw.chars().skip(st.viewport.scroll_x as usize).collect()
+        } else {
+            line.raw.clone()
+        };
+        for (seg, matched) in split_matches(&raw_view, &fm) {
             let style = match (matched, selected) {
                 (true, true) => base.bg(Color::DarkGray).add_modifier(Modifier::REVERSED | Modifier::BOLD),
                 (true, false) => base.add_modifier(Modifier::REVERSED),
@@ -218,9 +226,11 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
         }
         lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(lines).scroll((scroll_y as u16, 0)), area);
+    // [v0.7.6] 横向滚动：ratatui 的 scroll.x 仅在 wrap 模式生效（非 wrap 被忽略），
+    // 改为渲染前对 raw 做字符级 skip——级别前缀固定不动，长行尾部随 ←/→ 可见
+    frame.render_widget(Paragraph::new(lines), area);
     // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置
-    let mut sb_state = ScrollbarState::new(len).position(content_start);
+    let mut sb_state = ScrollbarState::new(len).position(start);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight),
         area,
@@ -276,14 +286,13 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     } else if st.sidebar.focus {
         "侧栏: ↑↓:选 Enter:连接 Tab/Esc:返回 q:退出侧栏"
     } else {
-        "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 1-4:级别 Space:跟随 g:最新"
+        "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 ←→:横滚 g:最新"
     };
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
     // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
-    let failed = st
-        .status_msg
-        .contains("失败")
-        || st.status_msg.contains("超时");
+    let failed = st.status_msg.contains("失败")
+        || st.status_msg.contains("超时")
+        || st.status_msg.contains("权限拒绝");
     let msg_span = if failed {
         Span::styled(st.status_msg.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
     } else {
@@ -337,13 +346,7 @@ fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, 
             Span::styled("原始: ", Style::default().fg(Color::DarkGray)),
             Span::raw(line.raw.clone()),
         ]));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "上下文 ±{}（{} - {}）:",
-                panel.context_after, panel.context_before, panel.context_after
-            ),
-            Style::default().fg(Color::DarkGray),
-        )));
+        // [v0.7.6] 去掉"上下文±N"标签行（信息并入 block title），±5 全部可见
         // 上下文窗口：选中行标 ▶（Day6 验收）
         for cl in buf.context(panel.line_no, panel.context_before, panel.context_after) {
             let marker = if cl.line_no == panel.line_no { "▶" } else { " " };
@@ -368,9 +371,10 @@ fn render_detail(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, 
 
     frame.render_widget(
         Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("选中行详情 (line_no={})", panel.line_no)),
+            Block::default().borders(Borders::ALL).title(format!(
+                "选中行详情 line_no={}（上下文±{}）  q:关 c:复制 t:trace p:源",
+                panel.line_no, panel.context_after
+            )),
         ),
         area,
     );
@@ -513,6 +517,53 @@ mod tests {
             }
         }
         assert!(found, "应渲染出命中行");
+    }
+
+    #[test]
+    fn 渲染_上翻后窗口跟随选中() {
+        // [v0.7.6] 复现 bug①：旧渲染 scroll(scroll_y) 与多带的内容行抵消，
+        // 光标上移屏幕不动。现在窗口精确切片——选中 L00 时日志区应显示头部行。
+        let mut st = test_state();
+        let mut buf = crate::log::LogBuffer::new(100);
+        for i in 0..30 {
+            let mut l = crate::log::LogLine { raw: format!("L{i:02}"), ..Default::default() };
+            l.source = "test-src".into();
+            buf.push(l);
+        }
+        st.buffers.insert("test-src".into(), buf);
+        st.selected_line_no = Some(0); // 选中最顶行
+        st.following = false;
+        // 契约：scroll_y = len - visible + 选中下标(0) = 30 - 18 + 0 = 12
+        // （真实场景由 move_selection 计算并写入，见 input.rs 键盘_上翻窗口跟随测试）
+        st.viewport.scroll_y = 12;
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join("
+");
+        assert!(all.contains("L00"), "窗口必须滚到选中行: {all}");
+        assert!(all.contains("L17"), "窗口 18 行到 L17");
+        assert!(!all.contains("L29"), "末尾行不得残留（旧 bug 显示恒为末尾）");
+    }
+
+    #[test]
+    fn 渲染_横向滚动_长行看全() {
+        // [v0.7.6] scroll_x 平移：长行右侧内容随 ←/→ 可见
+        let mut st = test_state();
+        let mut buf = crate::log::LogBuffer::new(10);
+        let mut l = crate::log::LogLine { raw: "AAAA".into(), ..Default::default() };
+        l.source = "test-src".into();
+        buf.push(l);
+        let mut l2 = crate::log::LogLine { raw: "BBBB-TAIL".into(), ..Default::default() };
+        l2.source = "test-src".into();
+        buf.push(l2);
+        st.buffers.insert("test-src".into(), buf);
+        st.viewport.scroll_x = 6; // 跳过 "INFO B" 前缀——行只有十几列，真实场景 ←/→ 步长 40
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join("
+");
+        assert!(all.contains("AIL"), "横滚后应看到长行尾部（skip 6 后剩 AIL）: {all}");
+        assert!(!all.contains("AAAA "), "前缀已被平移出屏: {all}");
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub fn layout(area: Rect, has_detail: bool) -> LayoutOut {
                 Constraint::Length(1), // 工具栏
                 Constraint::Length(1), // sparkline [v0.7]
                 Constraint::Min(8),    // 日志区
-                Constraint::Length(8), // 详情面板
+                Constraint::Length(16), // 详情面板 [v0.7.6] ±5 上下文全可见
             ])
             .split(hchunks[1]);
         (rchunks[0], rchunks[1], rchunks[2], Some(rchunks[3]))

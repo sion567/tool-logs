@@ -80,6 +80,14 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Down, _) => move_selection(st, 1),
         (KeyCode::PageUp, _) => move_selection(st, -(st.viewport.height.max(1) as isize)),
         (KeyCode::PageDown, _) => move_selection(st, st.viewport.height.max(1) as isize),
+        // [v0.7.6] ←/→ 横向滚动（步长=半屏），Home 复位到行首；长行看不全的解法
+        (KeyCode::Left, m) if m.is_empty() => {
+            st.viewport.scroll_x = st.viewport.scroll_x.saturating_sub(40)
+        }
+        (KeyCode::Right, m) if m.is_empty() => {
+            st.viewport.scroll_x = st.viewport.scroll_x.saturating_add(40)
+        }
+        (KeyCode::Home, _) => st.viewport.scroll_x = 0,
         // 锁定详情面板（§14）：底部展开 时间/级别/原始行/上下文±N
         (KeyCode::Enter, _) => {
             if let Some(no) = st.selected_line_no {
