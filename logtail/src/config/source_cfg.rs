@@ -8,7 +8,8 @@ use crate::source::LogSource;
 pub struct SourceConfig {
     /// 逻辑源名 = SourceId（如 "prod-api"）
     pub name: String,
-    /// 所属服务器名（对应 [[servers]].name）
+    /// 所属服务器名（对应 [[servers]].name）；本地源（type="local"）可省略
+    #[serde(default)]
     pub server: String,
     pub source: LogSource,
 }

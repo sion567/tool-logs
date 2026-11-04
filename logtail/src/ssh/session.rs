@@ -7,7 +7,8 @@ use crate::ssh::client::ClientHandler;
 use crate::ssh::stream::{LogStream, StreamEvent};
 
 pub struct ActiveSession {
-    pub handle: russh::client::Handle<ClientHandler>,
+    /// [v0.8] SSH 会话句柄；本地流源（LocalFile）为 None（断开时无需 disconnect）
+    pub handle: Option<russh::client::Handle<ClientHandler>>,
     pub stop_tx: tokio::sync::oneshot::Sender<()>,
     /// [§13] 泵发事件、主循环 try_recv 消费
     pub rx: tokio::sync::mpsc::Receiver<StreamEvent>,
@@ -29,7 +30,7 @@ impl ActiveSession {
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let handle = session;
+        let handle = Some(session);
         let jh = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -57,5 +58,82 @@ impl ActiveSession {
     /// 外部请求断开：通知泵退出，泵内 teardown 关 channel
     pub fn shutdown(self) {
         let _ = self.stop_tx.send(());
+    }
+
+    /// [v0.8 §20] 本地文件流泵：tail 语义（先回放末尾 N 行，之后 300ms 轮询增长）。
+    /// 不经 SSH——`local` 源的本地流双模（过滤/详情/导出与远端源完全一致）。
+    /// 打开失败不 panic：错误行 + Ended 发给主循环，状态栏可见。
+    pub fn spawn_local_file(
+        path: String,
+        tail: usize,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        use crate::ssh::stream::LineBuffer;
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let jh = tokio::spawn(async move {
+            let mut lb = LineBuffer::default();
+            let res = std::fs::File::open(&path);
+            if let Err(e) = res {
+                let _ = tx
+                    .send(StreamEvent::Lines(vec![format!("[本地文件打开失败] {e}")]))
+                    .await;
+                let _ = tx.send(StreamEvent::Ended).await;
+                return;
+            }
+            let mut file = res.unwrap();
+            use std::io::{Read, Seek, SeekFrom};
+            // 回放末尾 64KB（tail 行数近似；不足处按整行计）
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let start_pos = len.saturating_sub(64 * 1024);
+            let mut head = String::new();
+            if start_pos > 0 {
+                // 跳过被截断的半行
+                let _ = file.seek(SeekFrom::Start(start_pos));
+                let mut probe = vec![0u8; 512];
+                const NL_BYTE: u8 = 10;
+                let n = file.read(&mut probe).unwrap_or(0);
+                if let Some(pos) = probe[..n].iter().position(|&b| b == NL_BYTE) {
+                    let _ = file.seek(SeekFrom::Start(start_pos + pos as u64 + 1));
+                    head.push_str(&String::from_utf8_lossy(&probe[pos + 1..n]));
+                }
+            }
+            let mut rest = Vec::new();
+            let _ = file.read_to_end(&mut rest);
+            head.push_str(&String::from_utf8_lossy(&rest));
+            let mut lines = lb.push(head.as_bytes());
+            let skip = lines.len().saturating_sub(tail);
+            let batch: Vec<String> = lines.drain(..).skip(skip).collect();
+            if !batch.is_empty() {
+                let _ = tx.send(StreamEvent::Lines(batch)).await;
+            }
+            let mut pos = file.stream_position().unwrap_or(len);
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
+                        let _ = file.seek(SeekFrom::Start(pos));
+                        let mut grow = Vec::new();
+                        let _ = file.read_to_end(&mut grow);
+                        if !grow.is_empty() {
+                            pos += grow.len() as u64;
+                            let lines = lb.push(&grow);
+                            if !lines.is_empty() {
+                                let _ = tx.send(StreamEvent::Lines(lines)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        (
+            Self {
+                handle: None,
+                stop_tx,
+                rx,
+            },
+            jh,
+        )
     }
 }

@@ -458,14 +458,13 @@ pub async fn main_loop(
                 to_remove.push(sid);
             }
         }
-        // [v0.3 P2#10] remove + 显式 disconnect（Handle Drop 兜底关连接）
+        // [v0.3 P2#10] remove + 显式 disconnect（Handle Drop 兜底关连接；[v0.8] 本地源 handle=None 跳过）
         for sid in to_remove {
             if let Some(s) = st.connections.remove(&sid) {
                 let _ = s.stop_tx.send(());
-                let _ = s
-                    .handle
-                    .disconnect(Disconnect::ByApplication, "", "english")
-                    .await;
+                if let Some(h) = s.handle {
+                    let _ = h.disconnect(Disconnect::ByApplication, "", "english").await;
+                }
             }
         }
 
@@ -788,10 +787,9 @@ pub fn with_sudo(cmd: &str) -> String {
 async fn reconnect(st: &mut AppState, sid: &str) {
     if let Some(s) = st.connections.remove(sid) {
         let _ = s.stop_tx.send(());
-        let _ = s
-            .handle
-            .disconnect(Disconnect::ByApplication, "", "english")
-            .await;
+        if let Some(h) = s.handle {
+            let _ = h.disconnect(Disconnect::ByApplication, "", "english").await;
+        }
     }
     st.buffers.remove(sid);
     st.session_states.insert(sid.to_string(), SessionState::Connecting);

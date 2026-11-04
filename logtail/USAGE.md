@@ -90,7 +90,7 @@ level = "error"               # error / warn / info / debug
 since = "1h"                  # docker 直接用；journalctl 自动换算成绝对时间
 ```
 
-### 四种源类型
+### 六种源类型
 
 | type | 字段 | 远端实际执行的命令 |
 |------|------|--------------------|
@@ -98,6 +98,8 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 | `file` | `path`、`tail` | `tail -F -n N <路径>`（精准模式无 `-F`） |
 | `journalctl` | `service`、`since` | `journalctl [-f] -u <服务> [--since/--until]`（相对时长自动换算） |
 | `command` | `cmd` | 原样执行——**危险**：跳过全部校验，自己保证安全 |
+| `loki` (v0.8) | `url`、`query`(LogQL)、`limit` | 远端 `curl` 查 Loki HTTP API（需远端装 curl+jq）；一次性回放，`L`/`f` 换窗口 |
+| `local` (v0.8) | `path`、`tail`（**server 省略**） | 本地文件流，不经 SSH；过滤/详情/导出与远端源一致 |
 
 `since`/`until` 接受 `30m`/`1h`/`2d` 相对时长（docker 直接支持、journal 自动换算）或 RFC3339 绝对时间（`2026-11-04T10:00:00+08:00`）。
 

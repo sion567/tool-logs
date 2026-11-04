@@ -3,6 +3,7 @@
 pub mod docker;
 pub mod file;
 pub mod journal;
+pub mod loki;
 
 use serde::Deserialize;
 
@@ -16,6 +17,10 @@ pub enum SourceType {
     File,
     Journalctl,
     Command,
+    /// [v0.8] Loki HTTP 源（SSH+curl+jq 查询，短期历史回放）
+    Loki,
+    /// [v0.8] 本地文件流（不经 SSH，本地泵 tail 语义）
+    LocalFile,
 }
 
 /// 日志源声明（§6.1）。`tail` 缺省 100；`follow` 只是声明，由 ModeVariant 决策。
@@ -47,6 +52,25 @@ pub enum LogSource {
     },
     /// 高级：用户自己保证安全（§16.2）
     Command { cmd: String },
+    /// [v0.8 §20] Loki 源：url=http(s) 地址，query=LogQL，limit=单次回放条数上限。
+    /// 一次性查询（回放完 Ended），三种模式映射查询窗口；无 -f 概念。
+    Loki {
+        url: String,
+        query: String,
+        #[serde(default = "d_loki_limit")]
+        limit: usize,
+    },
+    /// [v0.8 §20] 本地文件流：不经 SSH，本地泵 tail 语义（本地流双模）
+    #[serde(rename = "local")]
+    LocalFile {
+        path: String,
+        #[serde(default = "d_tail")]
+        tail: usize,
+    },
+}
+
+fn d_loki_limit() -> usize {
+    1000
 }
 
 fn d_tail() -> usize {
@@ -60,6 +84,8 @@ impl LogSource {
             LogSource::File { .. } => SourceType::File,
             LogSource::Journalctl { .. } => SourceType::Journalctl,
             LogSource::Command { .. } => SourceType::Command,
+            LogSource::Loki { .. } => SourceType::Loki,
+            LogSource::LocalFile { .. } => SourceType::LocalFile,
         }
     }
 
@@ -75,6 +101,13 @@ impl LogSource {
                 journal::journal_command(service, since.as_ref(), mode)
             }
             LogSource::Command { cmd } => Ok(cmd.clone()), // 不走校验，用户自己承担
+            LogSource::Loki { url, query, limit } => {
+                loki::loki_command(url, query, *limit, mode)
+            }
+            // 本地源不经远端命令（app 层走本地泵）；此串仅作语义占位
+            LogSource::LocalFile { path, tail } => {
+                file::file_command(path, *tail, mode)
+            }
         }
     }
 }

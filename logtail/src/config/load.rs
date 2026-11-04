@@ -48,6 +48,17 @@ name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
 
+# [v0.8] Loki 源（远端需 curl+jq；一次性回放，按 L/f 换窗口）
+# [[sources]]
+# name = "loki-app"
+# server = "prod-01"
+# source = { type = "loki", url = "http://localhost:3100", query = '{job="my-app"}', limit = 1000 }
+
+# [v0.8] 本地文件流（不经 SSH，server 可省略；tail 语义）
+# [[sources]]
+# name = "local-log"
+# source = { type = "local", path = "C:/logs/app.log", tail = 200 }
+
 [presets.quick_error]
 name = "仅ERROR(1h)"
 level = "error"
@@ -154,6 +165,37 @@ auth={type=\"password\",password=\"x\"}",
         )
         .unwrap();
         assert!(!cfg2.servers[0].sudo, "缺省 false");
+    }
+
+    #[test]
+    fn loki与local源解析() {
+        // [v0.8] loki 源带 url/query/limit；local 源 server 可省略
+        let t = r#"
+[[sources]]
+name = "lk"
+server = "s"
+source = { type = "loki", url = "http://localhost:3100", query = '{job="my-app"}', limit = 500 }
+
+[[sources]]
+name = "loc"
+source = { type = "local", path = "/tmp/x.log", tail = 50 }
+"#;
+        let cfg: Config = toml::from_str(t).unwrap();
+        assert_eq!(cfg.sources.len(), 2);
+        assert_eq!(cfg.sources[0].server, "s");
+        assert_eq!(cfg.sources[1].server, "", "本地源 server 缺省为空");
+        match &cfg.sources[0].source {
+            crate::source::LogSource::Loki { url, query, limit } => {
+                assert_eq!(url, "http://localhost:3100");
+                assert_eq!(query, "{job=\"my-app\"}");
+                assert_eq!(*limit, 500);
+            }
+            other => panic!("应为 Loki，实际 {other:?}"),
+        }
+        assert!(matches!(
+            cfg.sources[1].source,
+            crate::source::LogSource::LocalFile { tail: 50, .. }
+        ));
     }
 
     #[test]

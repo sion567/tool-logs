@@ -497,3 +497,68 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// [v0.8] 本地文件流泵：tail 语义 + 增长轮询，不经 SSH
+#[tokio::test]
+async fn 本地流_回放与追加() -> anyhow::Result<()> {
+    use logtail::ssh::session::ActiveSession;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let dir = std::env::temp_dir().join(format!("logtail-local-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("app.log");
+    std::fs::write(&path, "l1
+l2
+l3
+l4
+")?;
+
+    let (mut sess, _jh) = ActiveSession::spawn_local_file(path.to_string_lossy().into_owned(), 2);
+
+    // 首批：末尾 2 行
+    let mut got = Vec::new();
+    for _ in 0..50 {
+        match sess.rx.try_recv() {
+            Ok(StreamEvent::Lines(ls)) => got.extend(ls),
+            Ok(StreamEvent::Ended) => break,
+            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    assert_eq!(got, vec!["l3", "l4"], "tail 语义：只回放末尾 2 行");
+
+    // 追加 → 300ms 轮询送达
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().append(true).open(&path)?;
+    writeln!(f, "l5")?;
+    f.flush()?;
+    let mut appended = Vec::new();
+    for _ in 0..50 {
+        match sess.rx.try_recv() {
+            Ok(StreamEvent::Lines(ls)) => appended.extend(ls),
+            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(30)).await,
+            _ => break,
+        }
+        if !appended.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(appended, vec!["l5"], "追加行必须送达");
+
+    // 停止：stop → 泵退出（rx 关闭）
+    let ActiveSession { stop_tx, mut rx, .. } = sess;
+    let _ = stop_tx.send(());
+    let mut closed = false;
+    for _ in 0..50 {
+        match rx.try_recv() {
+            Err(TryRecvError::Disconnected) => {
+                closed = true;
+                break;
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+        }
+    }
+    assert!(closed, "stop 后泵退出");
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
