@@ -1,7 +1,7 @@
 # logtail 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
-> 当前版本：v0.7.5
+> 当前版本：v0.8.4
 
 ---
 
@@ -94,7 +94,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 
 | type | 字段 | 远端实际执行的命令 |
 |------|------|--------------------|
-| `docker` | `container`、`tail`、`follow`、`since`、`until` | `docker logs [-f] --tail N [--since …] [--until …] --timestamps <容器>`（server 级 `sudo = true` 时整体加 `sudo -n` 前缀） |
+| `docker` | `container`、`tail`、`follow`、`since`、`until` | `docker logs [-f] --tail N [--since …] [--until …] --timestamps <容器>`（server 级 `sudo = true` 时整体加 sudo 前缀，见 FAQ） |
 | `file` | `path`、`tail` | `tail -F -n N <路径>`（精准模式无 `-F`） |
 | `journalctl` | `service`、`since` | `journalctl [-f] -u <服务> [--since/--until]`（相对时长自动换算） |
 | `command` | `cmd` | 原样执行——**危险**：跳过全部校验，自己保证安全 |

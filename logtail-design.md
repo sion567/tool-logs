@@ -1,4 +1,4 @@
-# 远程日志查看工具 — 开发文档 v0.8.0
+# 远程日志查看工具 — 开发文档 v0.8.4
 
 > **修订日期**：2026-11-04
 > **基于版本**：v0.4.0
@@ -358,6 +358,7 @@ logtail/
 └── src/
     ├── lib.rs                     # 模块根（tests/integration.rs 引用库需要它）
     ├── main.rs                    # 入口：默认 TUI；--demo 无头打印
+    ├── demo.rs                    # --demo 无头模式实现（含本地文件冒烟）
     ├── app.rs                     # AppState、主循环、事件分发、连接流、PendingAction
     ├── error.rs                   # LogtailError
     ├── ui/
@@ -374,7 +375,8 @@ logtail/
     │   ├── mod.rs                 # LogSource + ModeVariant + Preset + to_command + 安全校验
     │   ├── docker.rs              # docker 命令构造（match mode 取时间窗）
     │   ├── file.rs                # tail 参数构造
-    │   └── journal.rs             # journalctl + 相对时长换算
+    │   ├── journal.rs             # journalctl + 相对时长换算
+    │   └── loki.rs               # [v0.8] Loki curl+jq 命令构造 + URL/LogQL 校验
     ├── log/
     │   ├── mod.rs                 # LogLine / LogLevel 定义
     │   ├── buffer.rs              # LogBuffer（line_no 连续窗口、front 偏移反查）
@@ -755,11 +757,29 @@ pub enum LogSource {
         since: Option<String>,  // 配置级默认；运行时优先 mode
     },
     Command { cmd: String },    // 高级：用户自己保证安全
+    /// [v0.8] Loki 源：一次性查询（curl+jq），三种模式映射查询窗口，无 -f 概念
+    Loki {
+        url: String,
+        query: String,          // LogQL；白名单拒 ' $ ; & `（双引号放行）
+        limit: usize,           // 单次回放条数上限（缺省 1000）
+    },
+    /// [v0.8] 本地文件流：不经 SSH，本地泵 tail 语义（server 可省略）
+    LocalFile {
+        path: String,
+        tail: usize,
+    },
 }
 
-/// [v0.4 P2#6] 解析器用：是否拆 docker JSON 包壳。此前 SourceType 全文使用却无定义。
+/// [v0.4 P2#6 / v0.8] 解析器用：是否拆 docker JSON 包壳等
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceType { Docker, File, Journalctl, Command }
+pub enum SourceType {
+    Docker,
+    File,
+    Journalctl,
+    Command,
+    Loki,       // 时间戳由命令预置 RFC3339 前缀，extract_timestamp 提取
+    LocalFile,  // 同 File（纯文本）
+}
 
 impl LogSource {
     pub fn source_type(&self) -> SourceType {
@@ -848,6 +868,11 @@ impl LogSource {
 | Full | `-f --tail N --timestamps` | `tail -F -n N` | `journalctl -f -u svc` |
 | Quick{since} | `-f --tail N --since …` | `tail -F -n N` | `journalctl -f -u svc --since …` |
 | Range(s,u) | `--tail N --since s --until u`（**无 -f**） | `tail -n N`（无 -f） | `journalctl -u svc --since s --until u`（**无 -f**） |
+
+> **[v0.8] Loki 源命令形态**（六种源之二新增）：
+> `curl -sG '<url>' --data-urlencode query='<LogQL>' --data-urlencode limit=N [--data-urlencode since=1h | start/end=<纳秒>] --data-urlencode direction=backward \| jq -r '[.data.result[].values[]] \| sort_by(.[0]) \| .[] \| (.[0]\|tonumber/1e9\|strftime("%FT%TZ")) + " " + .[1]'`
+> ——stdout 按行输出 `RFC3339 原文` 复用既有管线；jq `sort_by` 保证跨流全局时间序（旧→新入缓冲）。
+> **本地源（type="local"）不经远端命令**：本地泵 tail 语义（§7.4 spawn_local_file），双模过滤/详情/导出一致。
 
 > v0.4 起：实现与上表一致。v0.3 的 journal 实现产不出 Range 行的时间窗（[v0.4 P0#3]），表格只是纸上谈兵。
 
@@ -1978,7 +2003,7 @@ async fn eof_terminates_pump() {
 ## 十八、落地验证清单
 
 - [x] `cargo build` 干净通过（v0.4 全链：§13 借用重构、§11.4 取出式状态机、`LogLine: Default`、`layout` 形参）——已落地
-- [x] `cargo test` 全绿（48 个用例：41 单测 + 7 集成）——已落地
+- [x] `cargo test` 全绿（76 个用例：65 单测 + 11 集成）——已落地
 - [x] **一键路径**：冷启动 → `Tab`/`↑↓` 侧栏选源 → `Enter`，全程不敲一条命令——已落地（TUI 交互待真机手测）
 - [x] **[v0.4 P0#1]** `buffer_淘汰后_by_line_no_仍正确` 跑绿（front 偏移实现）——已落地
 - [x] **[v0.4 P0#2]** 一次 read 解出 N 行 → N 行全部进 buffer（`Lines(Vec<String>)` 整批透传，集成测试锁定行序完整）——已落地
@@ -2010,6 +2035,7 @@ async fn eof_terminates_pump() {
 | ANSI 混合输出 | 复杂转义可能乱 | 已落地 `strip_ansi` 剥除（v0.4）；样式保留（远端色→ratatui 样式映射）留给 anstyle-parse |
 | 多源并发上限 | 开太多连不优雅 | 连接池 + per-source backpressure |
 | 时间解析覆盖 | 只认 RFC3339 + 常见格式 | 配置自定义时间格式串 |
+| Loki 源远端依赖 | `curl` + `jq` 必须在 SSH 目标机上（USAGE 已标注） | 可选：本地 HTTP 客户端直连（新增依赖） |
 | trace_id 抽取 | 当前靠简单正则 | 来源级字段映射配置 |
 
 ---

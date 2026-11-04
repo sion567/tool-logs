@@ -1,6 +1,6 @@
 # logtail — 远程日志查看工具
 
-基于 SSH 的终端日志查看器：连接远程服务器，把 docker / 文件 / systemd 的日志流拉到本地，实时过滤、着色、下钻——替代 `ssh + docker logs -f + grep`。设计与实现细节见 `../logtail-design.md`（v0.7.5）。
+基于 SSH 的终端日志查看器：连接远程服务器，把 docker / 文件 / systemd 的日志流拉到本地，实时过滤、着色、下钻——替代 `ssh + docker logs -f + grep`。设计与实现细节见 `../logtail-design.md`（v0.8.4）。
 
 ## 快速开始
 
