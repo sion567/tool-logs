@@ -449,6 +449,7 @@ mod tests {
             user: "root".into(),
             auth: crate::config::AuthCfg::Password { password: "x".into() },
             sudo: false,
+            sudo_password: None,
         });
         cfg.sources.push(SourceConfig {
             name: "prod-api".into(),

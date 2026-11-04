@@ -20,7 +20,19 @@ use tokio::sync::mpsc::error::TryRecvError;
 /// - `echo`        → 两行（`echo hi; exit 0`）
 /// - `crlf`        → CRLF 行尾（Windows 风格 / 某些 agent 输出）
 /// - `big`         → 500 行、每包 25 行分 20 次发（高吞吐分包重组）
-struct TestServer;
+/// - `sudo -S …`   → 等 stdin 密码，比对 sudo_pw：对则发 "sudo-ok"，错则发拒绝信息（[v0.8.1]）
+struct TestServer {
+    /// sudo 密码握手用：Some(期望密码) 时启用 sudo 模拟
+    sudo_pw: Option<String>,
+    /// exec 收到 sudo -S 命令时记下 channel，等 data 回调收密码
+    await_pw: Option<ChannelId>,
+}
+
+impl TestServer {
+    fn new(sudo_pw: Option<String>) -> Self {
+        Self { sudo_pw, await_pw: None }
+    }
+}
 
 #[async_trait::async_trait]
 impl Handler for TestServer {
@@ -38,6 +50,29 @@ impl Handler for TestServer {
         Ok(true)
     }
 
+    // [v0.8.1] sudo -S 握手：stdin 数据 = 密码行，比对后回数据
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let (Some(expected), Some(_)) = (&self.sudo_pw, self.await_pw) {
+            let got = String::from_utf8_lossy(data).trim_end().to_string();
+            let mut payload = "sudo: 密码错误
+".to_string();
+            if got == *expected {
+                payload = "sudo-ok
+".to_string();
+            }
+            session.data(channel, CryptoVec::from_slice(payload.as_bytes()));
+            session.eof(channel);
+            session.close(channel);
+            self.await_pw = None;
+        }
+        Ok(())
+    }
+
     async fn exec_request(
         &mut self,
         channel: ChannelId,
@@ -45,6 +80,27 @@ impl Handler for TestServer {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         let cmd = String::from_utf8_lossy(data).to_string();
+        // [v0.8.1] sudo -S：等 stdin 密码（data 回调），本轮不发载荷
+        if cmd.contains("sudo -S") {
+            if self.sudo_pw.is_some() {
+                self.await_pw = Some(channel);
+            } else {
+                // 未启用 sudo 模拟：模拟 NOPASSWD 缺失——直接回错误
+                session.data(channel, CryptoVec::from_slice(b"sudo: a password is required
+"));
+                session.eof(channel);
+                session.close(channel);
+            }
+            return Ok(());
+        }
+        // [v0.8.1] sudo -n：模拟"未配 NOPASSWD"——报错进日志流（本桩语义固定）
+        if cmd.contains("sudo -n") {
+            session.data(channel, CryptoVec::from_slice(b"sudo: a password is required
+"));
+            session.eof(channel);
+            session.close(channel);
+            return Ok(());
+        }
         // [v0.6] 模拟服务端 grep：命令带 `| grep -E --line-buffered '<pat>'` 时，
         // 只回传匹配行（子串匹配模拟 ERE 的常用子集）
         let grep_pat = cmd.split("--line-buffered ").nth(1).map(|rest| {
@@ -93,6 +149,10 @@ impl Handler for TestServer {
 }
 
 async fn spawn_sshd() -> anyhow::Result<u16> {
+    spawn_sshd_sudo(None).await
+}
+
+async fn spawn_sshd_sudo(sudo_pw: Option<String>) -> anyhow::Result<u16> {
     let host_key = KeyPair::generate_ed25519().expect("生成 host key");
     let config = Arc::new(russh::server::Config {
         keys: vec![host_key],
@@ -111,8 +171,9 @@ async fn spawn_sshd() -> anyhow::Result<u16> {
                 Err(_) => break,
             };
             let config = config.clone();
+            let server = TestServer::new(sudo_pw.clone());
             tokio::spawn(async move {
-                let _ = russh::server::run_stream(config, socket, TestServer).await;
+                let _ = russh::server::run_stream(config, socket, server).await;
             });
         }
     });
@@ -268,6 +329,7 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
             sudo: false,
+            sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -353,6 +415,7 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
             sudo: false,
+            sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -443,6 +506,7 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
         user: "tester".into(),
         auth: AuthCfg::Password { password: "pw".into() },
             sudo: false,
+            sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -560,5 +624,75 @@ l4
     }
     assert!(closed, "stop 后泵退出");
     std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
+/// [v0.8.1] sudo -S 密码流端到端：密码写 stdin → 服务端 data 回调比对 → 回放数据。
+/// 验证 do_connect 的 make_writer 写入 + eof 路径与 do_connect 完全一致的手写序列。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sudo密码流_写入stdin后服务端放行() -> anyhow::Result<()> {
+    let port = spawn_sshd_sudo(Some("welcome01!".into())).await?;
+    let auth = AuthCfg::Password { password: "pw".into() };
+    let sess = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect("127.0.0.1", port, "tester", &auth),
+    )
+    .await??;
+    let ch = sess.channel_open_session().await?;
+    ch.exec(true, "sudo -S -p '' docker logs -f x".as_bytes()).await?;
+    // 与 do_connect 完全一致的密码写入路径
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut w = ch.make_writer();
+        w.write_all(b"welcome01!
+").await?;
+    }
+    ch.eof().await?;
+    let mut log = LogStream::new(ch);
+
+    let mut got = Vec::new();
+    let mut ended = false;
+    for _ in 0..200 {
+        match log.try_next().await? {
+            Some(StreamEvent::Lines(lines)) => got.extend(lines),
+            Some(StreamEvent::Ended) => {
+                ended = true;
+                break;
+            }
+            None => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    log.teardown().await;
+    assert!(ended);
+    assert_eq!(got, vec!["sudo-ok"], "密码正确后服务端放行回数据");
+    Ok(())
+}
+
+/// [v0.8.1] sudo -n（无密码模式）在未配 NOPASSWD 的机器上：报错进日志流、自然结束不挂起
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sudo_n_无NOPASSWD时报错不挂起() -> anyhow::Result<()> {
+    let port = spawn_sshd().await?; // sudo_pw=None：模拟未启用
+    let auth = AuthCfg::Password { password: "pw".into() };
+    let sess = tokio::time::timeout(
+        Duration::from_secs(15),
+        connect("127.0.0.1", port, "tester", &auth),
+    )
+    .await??;
+    let ch = sess.channel_open_session().await?;
+    ch.exec(true, "sudo -n docker logs -f x".as_bytes()).await?;
+    let mut log = LogStream::new(ch);
+    let mut got = Vec::new();
+    for _ in 0..200 {
+        match log.try_next().await? {
+            Some(StreamEvent::Lines(lines)) => got.extend(lines),
+            Some(StreamEvent::Ended) => break,
+            None => tokio::time::sleep(Duration::from_millis(10)).await,
+        }
+    }
+    log.teardown().await;
+    assert!(
+        got.iter().any(|l| l.contains("password is required")),
+        "sudo -n 报错进日志流: {got:?}"
+    );
     Ok(())
 }

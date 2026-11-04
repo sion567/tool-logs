@@ -762,10 +762,24 @@ async fn do_connect(
     let handle =
         crate::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
     let mut cmd = src.to_command(mode)?;
-    // [v0.7.7] sudo 前缀（server 级开关）：`sudo -n docker logs … | grep …`——
-    // sudo 只包主命令，grep 无需提权；须在 prefilter 管道之前
+    // [v0.7.7/v0.8.1] sudo 前缀（server 级开关）；密码模式：
+    // sudo_password 未填时复用 auth.password（sudo 密码=登录密码的常见场景）
+    let sudo_pw: Option<String> = if srv.sudo {
+        Some(
+            srv.sudo_password
+                .clone()
+                .or_else(|| match &srv.auth {
+                    crate::config::AuthCfg::Password { password } => Some(password.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+        )
+        .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
     if srv.sudo {
-        cmd = with_sudo(&cmd);
+        cmd = with_sudo(&cmd, sudo_pw.as_deref());
     }
     // [v0.6 §16.6] 远端预过滤：管道接在最终命令上（docker/journal/tail/command 通用）
     if let Some(p) = prefilter {
@@ -773,14 +787,27 @@ async fn do_connect(
     }
     let ch = handle.channel_open_session().await?;
     ch.exec(true, cmd).await?;
+    // [v0.8.1] sudo -S 密码模式：exec 后立即写密码到 stdin 并 EOF——
+    // sudo 读到密码行后放行；EOF 防止密码错时 sudo 挂起等 stdin
+    if let Some(pw) = &sudo_pw {
+        use tokio::io::AsyncWriteExt;
+        let mut w = ch.make_writer();
+        w.write_all(format!("{pw}
+").as_bytes()).await?;
+        let _ = ch.eof().await;
+    }
     let (sess, _jh) = ActiveSession::spawn(handle, crate::ssh::LogStream::new(ch));
     Ok(sess)
 }
 
-/// [v0.7.7] `sudo -n` 前缀：纯函数便于测试。须配合远端 sudoers NOPASSWD 白名单
-/// （见 USAGE），未配置时 sudo 立即失败并把报错写进日志流，不会挂起等待密码。
-pub fn with_sudo(cmd: &str) -> String {
-    format!("sudo -n {cmd}")
+/// [v0.7.7/v0.8.1] sudo 前缀（纯函数便于测试）：
+/// - 有密码（NOPASSWD 未配）→ `sudo -S -p ''`：从 stdin 读密码，`-p ''` 关提示符防混入日志流
+/// - 无密码（已配 NOPASSWD）→ `sudo -n`：非交互，未配时立即报错进日志流不挂起
+pub fn with_sudo(cmd: &str, password: Option<&str>) -> String {
+    match password {
+        Some(_) => format!("sudo -S -p '' {cmd}"),
+        None => format!("sudo -n {cmd}"),
+    }
 }
 
 /// R/f/预设共用的重连路径：先 shutdown 旧会话（§14）再建新
