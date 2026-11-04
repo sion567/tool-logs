@@ -405,11 +405,12 @@ pub async fn main_loop(
                             if st.regex_mode { "开" } else { "关" }
                         );
                     }
-                    // [v0.4 P1#8] Idle 的 '/' 也要进过滤层，否则永远进不了 Typing
+                    // [v0.7.5] 详情面板不再全键盘劫持：只消费自己的键（detail_consumes），
+                    // 其余透传正常层——v0.7.3 过滤层同款 bug 的镜像修复
                     else if crate::log::routes_to_filter(&k, &st.filter_state) {
                         handle_filter_key(k, &mut st);
-                    } else if st.detail_panel.is_some() {
-                        crate::ui::input::handle_detail_key(k, &mut st); // Day6
+                    } else if st.detail_panel.is_some() && crate::ui::input::detail_consumes(&k) {
+                        crate::ui::input::handle_detail_key(k, &mut st);
                     } else {
                         handle_normal_key(k, &mut st);
                     }

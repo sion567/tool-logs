@@ -103,6 +103,11 @@ fn handle_sidebar_key(key: KeyEvent, st: &mut AppState) {
             st.sidebar.focus = false;
             st.status_msg = String::new();
         }
+        // [v0.7.5] q 只退出侧栏聚焦——聚焦侧栏时误按 q 直接杀掉整个程序（可能正连着多个源）
+        KeyCode::Char('q') | KeyCode::Char('Q') => {
+            st.sidebar.focus = false;
+            st.status_msg = "已退出侧栏".into();
+        }
         KeyCode::Up => sidebar_move(st, -1),
         KeyCode::Down => sidebar_move(st, 1),
         KeyCode::Enter => {
@@ -117,8 +122,7 @@ fn handle_sidebar_key(key: KeyEvent, st: &mut AppState) {
                 }
             }
         }
-        KeyCode::Char('q') => st.should_quit = true,
-        _ => {}
+        _ => {} // [v0.7.5] 旧 q 退出分支已删（q 现在只退出侧栏聚焦）
     }
 }
 
@@ -187,8 +191,13 @@ fn move_selection(st: &mut AppState, delta: isize) {
         _ => span, // 无选中 → 末尾
     };
     let next = (cur + delta).clamp(0, span) as usize;
-    st.selected_line_no = Some(front + next as u64);
+    let new_no = front + next as u64;
+    st.selected_line_no = Some(new_no);
     st.following = false;
+    // [v0.7.5] 详情面板开着时跟随选中行刷新（面板不再劫持 ↑↓，透传后由此同步）
+    if let Some(panel) = st.detail_panel.as_mut() {
+        panel.line_no = new_no;
+    }
 
     // 保证可见：显示窗口 = [len - visible - scroll_y, len - scroll_y)
     let visible = st.viewport.height.max(1) as usize;
@@ -218,8 +227,8 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
         }
 
         FilterState::Typing { mut input, mut cursor } => {
-            match key.code {
-                KeyCode::Enter => {
+            match (key.code, key.modifiers) {
+                (KeyCode::Enter, _) => {
                     if input.is_empty() {
                         // 空输入 = 清空过滤；暂置的 Idle 恰为目标态
                     } else if st.regex_mode {
@@ -240,7 +249,7 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                     st.last_rebuild += 1;
                 }
 
-                KeyCode::Esc => {
+                (KeyCode::Esc, _) => {
                     // Esc = 清空过滤 → Idle；暂置值即目标态
                     st.last_rebuild += 1;
                 }
@@ -248,22 +257,36 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                 // [v0.7.2] `r` 不再是正则切换键——它必须能作为普通字符输入
                 // （过滤词 "error" 里的 r 曾把正则来回切，字母打不进去）。
                 // 正则切换改用 Ctrl+R（全局，见 main_loop）或非编辑态的 r。
-                KeyCode::Char(c)
-                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                (KeyCode::Char(c), m)
+                    if m.is_empty() || m == KeyModifiers::SHIFT =>
                 {
                     // SHIFT 放行：否则大写字母根本无法输入（is_empty 会丢掉 Shift+E）
                     edit_insert(&mut input, &mut cursor, c); // 按字符计数，多字节安全
                     st.filter_state = FilterState::Typing { input, cursor };
                 }
-                KeyCode::Backspace => {
+                (KeyCode::Backspace, _) => {
                     edit_backspace(&mut input, &mut cursor);
                     st.filter_state = FilterState::Typing { input, cursor };
                 }
-                KeyCode::Left => {
+                // [v0.7.5] Ctrl+H = 旧式 Backspace 上报（部分终端/SSH 链路）；
+                // 不能走 Char(c)+CONTROL 插入字母 h
+                (KeyCode::Char('h'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    edit_backspace(&mut input, &mut cursor);
+                    st.filter_state = FilterState::Typing { input, cursor };
+                }
+                (KeyCode::Home, _) => {
+                    cursor = 0;
+                    st.filter_state = FilterState::Typing { input, cursor };
+                }
+                (KeyCode::End, _) => {
+                    cursor = input.chars().count();
+                    st.filter_state = FilterState::Typing { input, cursor };
+                }
+                (KeyCode::Left, _) => {
                     cursor = cursor.saturating_sub(1);
                     st.filter_state = FilterState::Typing { input, cursor };
                 }
-                KeyCode::Right => {
+                (KeyCode::Right, _) => {
                     cursor = (cursor + 1).min(input.chars().count()); // 字符数，不是字节数
                     st.filter_state = FilterState::Typing { input, cursor };
                 }
@@ -302,18 +325,36 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
     }
 }
 
+/// [v0.7.5] 详情面板要消费的键：关闭/复制/trace/聚焦。其余透传正常层——
+/// 面板开着时 ↑↓ 导航、R 重连、/ 过滤、,/. 切 tab 全部照常可用（面板内容随选中行刷新）。
+pub fn detail_consumes(k: &KeyEvent) -> bool {
+    matches!(
+        k.code,
+        KeyCode::Char('q')
+            | KeyCode::Char('Q')
+            | KeyCode::Esc
+            | KeyCode::Char('c')
+            | KeyCode::Char('C')
+            | KeyCode::Char('t')
+            | KeyCode::Char('T')
+            | KeyCode::Char('p')
+            | KeyCode::Char('P')
+    ) && !k.modifiers.contains(KeyModifiers::CONTROL) // Ctrl 组合留给全局层
+}
+
 /// 详情面板按键（§四 Day6：c 复制 / t trace 过滤 / p 聚焦源 / q 关面板）
+/// [v0.7.5] 大小写不敏感；↑↓ 改选中后面板跟随刷新（由 main_loop 透传实现）
 pub fn handle_detail_key(key: KeyEvent, st: &mut AppState) {
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => {
-            st.detail_panel = None; // q 关面板（Esc 与过滤层的清空语义不冲突：分发顺序过滤优先）
+        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+            st.detail_panel = None; // q 关面板
         }
-        KeyCode::Char('c') => copy_selected(st),
-        KeyCode::Char('t') => filter_by_trace(st),
-        KeyCode::Char('p') => {
+        KeyCode::Char('c') | KeyCode::Char('C') => copy_selected(st),
+        KeyCode::Char('t') | KeyCode::Char('T') => filter_by_trace(st),
+        KeyCode::Char('p') | KeyCode::Char('P') => {
             st.status_msg = "多 tab 同屏在 v0.5；当前会话已是单源视图".into()
         }
-        _ => {}
+        _ => {} // 其余已在 detail_consumes 排除，不会到这里
     }
 }
 
@@ -582,6 +623,68 @@ mod tests {
         assert!(matches!(st.pending, Some(PendingAction::Reconnect)), "大写 R = 重连");
         st.pending = None;
         assert!(!st.regex_mode, "大写 R 不得触发正则切换");
+    }
+
+    #[test]
+    fn 键盘_详情面板不再劫持导航与重连() {
+        // [v0.7.5] v0.7.3 过滤层同款 bug 的镜像：面板开着时 R/↑ 必须透传
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let big_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        // 透传判定
+        assert!(!detail_consumes(&up), "↑ 透传正常层");
+        assert!(!detail_consumes(&big_r), "R 重连透传");
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(!detail_consumes(&slash), "/ 过滤透传（路由层处理）");
+        // 面板自己的键（大小写都认）
+        for c in ['q', 'Q', 'c', 'C', 't', 'T', 'p', 'P'] {
+            let k = KeyEvent::new(KeyCode::Char(c), if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE });
+            assert!(detail_consumes(&k), "{c} 应被面板消费");
+        }
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(detail_consumes(&esc));
+        // Ctrl 组合不归面板（留给全局层）
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(!detail_consumes(&ctrl_c));
+    }
+
+    #[test]
+    fn 键盘_侧栏q只退出侧栏() {
+        // [v0.7.5] 聚焦侧栏误按 q 曾直接杀程序（可能正连着多个源）
+        let mut st = test_state();
+        st.sidebar.focus = true;
+        handle_sidebar_key(key('q'), &mut st);
+        assert!(!st.sidebar.focus, "q 退出侧栏聚焦");
+        assert!(!st.should_quit, "q 不得退出程序");
+        // Q 同样
+        st.sidebar.focus = true;
+        handle_sidebar_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT), &mut st);
+        assert!(!st.sidebar.focus && !st.should_quit);
+    }
+
+    #[test]
+    fn 键盘_编辑器CtrlH与HomeEnd() {
+        let mut st = test_state();
+        handle_filter_key(key('/'), &mut st);
+        for c in "abc".chars() {
+            handle_filter_key(key(c), &mut st);
+        }
+        // Ctrl+H = 旧式 Backspace，不得插入字母 h
+        handle_filter_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL), &mut st);
+        match &st.filter_state {
+            FilterState::Typing { input, .. } => assert_eq!(input, "ab", "Ctrl+H 退格而非插 h"),
+            other => panic!("{other:?}"),
+        }
+        // Home 到头，End 回尾
+        handle_filter_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &mut st);
+        match &st.filter_state {
+            FilterState::Typing { cursor, .. } => assert_eq!(*cursor, 0),
+            other => panic!("{other:?}"),
+        }
+        handle_filter_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &mut st);
+        match &st.filter_state {
+            FilterState::Typing { cursor, .. } => assert_eq!(*cursor, 2),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
