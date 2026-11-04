@@ -99,10 +99,24 @@ pub fn rebuild_view(buffer: &crate::log::LogBuffer, fm: &FilterMode, lf: LevelFi
         .collect()
 }
 
-/// [v0.4 P1#8] 过滤层路由条件：非 Idle 全收；Idle 只放行 '/'。
-/// v0.3 写 `!= Idle`——Idle 的 '/' 落进 handle_normal_key，永远进不了 Typing（入口断裂）。
+/// [v0.7.3] 过滤层按键路由：按状态精确声明"过滤层要消费哪些键"，**其余全部透传正常层**。
+///
+/// v0.3 的 `!= Idle 全收` 是设计错误：应用过滤后（Active）所有键被吞——R 重连、↑↓ 导航、
+/// q 退出全部失灵，只有 Ctrl+C 能逃出来（用户真机踩中）。
+/// - Typing：编辑中，全收（Esc 退出编辑、Enter 确认）
+/// - Active：只消费 `/`（重编辑）、`Esc`（清空）、`r`（切正则）；过滤保持生效，其余透传
+/// - Error：只消费 `Esc`/`Enter`（回编辑继续改）；其余透传
+/// - Idle：只消费 `/`
 pub fn routes_to_filter(k: &KeyEvent, fs: &FilterState) -> bool {
-    *fs != FilterState::Idle || k.code == KeyCode::Char('/')
+    match fs {
+        FilterState::Idle => k.code == KeyCode::Char('/'),
+        FilterState::Typing { .. } => true,
+        FilterState::Active(_) => matches!(
+            k.code,
+            KeyCode::Char('/') | KeyCode::Esc | KeyCode::Char('r')
+        ),
+        FilterState::Error(_) => matches!(k.code, KeyCode::Esc | KeyCode::Enter),
+    }
 }
 
 /// [v0.4 二轮] cursor 按【字符数】计，不按字节：过滤词是中文是常态，
@@ -183,12 +197,32 @@ mod tests {
     }
 
     #[test]
-    fn 过滤路由_Idle的斜杠不漏() {
+    fn 过滤路由_按状态精确消费_其余透传() {
         let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let big_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT); // 重连
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(routes_to_filter(&slash, &FilterState::Idle)); // Idle + '/' 必须进过滤层
-        assert!(!routes_to_filter(&a, &FilterState::Idle)); // Idle + 其它键不进
+        let active = FilterState::Active(FilterMode::Text("err".into()));
+
+        // Idle：只有 '/' 进过滤层
+        assert!(routes_to_filter(&slash, &FilterState::Idle));
+        assert!(!routes_to_filter(&a, &FilterState::Idle));
+        // Typing：全收
         assert!(routes_to_filter(&a, &FilterState::Typing { input: "x".into(), cursor: 1 }));
+        // Active：只消费 / Esc r；R 重连、↑ 导航、字母透传正常层（v0.7.3 修复重连失效）
+        assert!(routes_to_filter(&slash, &active));
+        assert!(routes_to_filter(&esc, &active));
+        assert!(routes_to_filter(&r, &active));
+        assert!(!routes_to_filter(&big_r, &active), "R 重连必须透传");
+        assert!(!routes_to_filter(&up, &active), "导航必须透传");
+        assert!(!routes_to_filter(&a, &active));
+        // Error：只消费 Esc/Enter
+        assert!(routes_to_filter(&esc, &FilterState::Error("x".into())));
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(routes_to_filter(&enter, &FilterState::Error("x".into())));
+        assert!(!routes_to_filter(&a, &FilterState::Error("x".into())));
     }
 
     #[test]
