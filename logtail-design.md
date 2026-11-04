@@ -50,6 +50,17 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.8.1，用户反馈）
+
+用户 237 场景：`sudo = true` 后提示 "sudo: 需要密码"——`-n` 非交互模式要求 NOPASSWD，而用户习惯 `sudo su` 输密码。
+
+| 内容 | 说明 | 落点 |
+|------|------|------|
+| `sudo -S` 密码模式 | sudo_password 缺省**复用 auth.password**（sudo 密码=登录密码的常见场景），可显式覆盖；`-p ''` 关提示符防混入日志流 | §8、§13 |
+| 密码通道 | exec 后经 SSH stdin `make_writer` 写入密码行 + 立即 `eof()`——密码错时 sudo 不挂起（stdin EOF 后放弃），报错进日志区 | §13 do_connect |
+| 三态总结 | `sudo=true`：有 NOPASSWD → `-n`；无 → 登录密码 `-S`；显式 sudo_password 覆盖 | §16 |
+| 测试 | TestServer 模拟 sudo 密码握手（data 回调收密码比对回数据）：`sudo密码流_写入stdin后服务端放行`、`sudo_n_无NOPASSWD时报错不挂起` | §17 |
+
 ## 变更记录（v0.8.0，路线图 v0.8）
 
 **主题：Loki 数据源 + 本地流双模（§20 v0.8）**——守住"核心不动"：全部仍走"命令/泵 → StreamEvent::Lines → parse → buffer"既有管线，过滤/详情/导出/远筛对新源零改动生效。
