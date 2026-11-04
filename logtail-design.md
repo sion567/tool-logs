@@ -50,6 +50,18 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.7.6，用户反馈五项）
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | **↑ 移动光标但窗口内容不动** | 渲染层双重抵消：内容取到末尾 + `scroll(scroll_y)` 跳过前 scroll_y 行，二者恰好抵消，屏幕恒显示末尾 visible 行（ratatui Paragraph scroll 是"跳过内容"而非"平移视口"） | 窗口精确切片 `hits[end-visible..end]`（end=len-scroll_y），纵向 scroll 恒 0 |
+| 2 | 详情面板上下文±5 只能看到 3 行 | 面板高 8 行，减边框/头部行后剩 3 行给上下文 | 高度 8→16，"上下文±N"标签并入 block title |
+| 3 | 长行看不全 | 日志区无横向滚动；且 ratatui `scroll.x` 仅在 wrap 模式生效（非 wrap 被忽略——第二个坑） | 渲染前对 raw 做字符级 skip（级别前缀固定），`←/→` 半屏平移、`Home` 复位 |
+| 4 | 侧栏不是树形（先全部 server 再全部 source） | sidebar_entries 两个独立循环 | 树形分组：server 后紧跟其 sources；孤儿源单独成组标 ⚠ |
+| 5 | 非 docker 组用户只见 permission denied，无引导 | 远端 stderr 混在日志流里 | drain 时检测 `permission denied`+`docker.sock` → 状态栏红字给修复命令 |
+
+**测试**：上翻窗口跟随/横滚/树形分组 3 例新增，66 用例全绿。
+
 ## 变更记录（v0.7.5，键位横向审计）
 
 全键盘矩阵审计（每个界面态 × 每个按键的路由逐一核对），发现并修复过滤层/侧栏同款"全键盘劫持"及其它 5 项：
