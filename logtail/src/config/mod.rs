@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-pub use load::{config_dir, load, load_state, save_state, StateFile};
+pub use load::{append_error_log, config_dir, load, load_state, save_state, StateFile};
 pub use server::{AuthCfg, ServerConfig};
 pub use source_cfg::SourceConfig;
 

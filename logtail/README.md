@@ -68,6 +68,14 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 2. **精准模式命令回显**：`f` 循环到"精准"，在远端 `ps aux | grep -E "docker logs|journalctl"` 应看到**无 `-f`** 且带 `--since/--until`；docker 与 journal 两类源都要验
 3. **缩放/ANSI/超长行**：拖动窗口大小不崩；跑一段带颜色的日志确认色码被剥掉不出现乱码；灌一条 >10KB 的栈回溯确认完整显示不截断内存不涨
 
+## 排障
+
+```bash
+logtail --check-config   # 校验配置（语法/源→服务器引用），✔/✘ 报告
+# 闪退/报错永远有痕：~/.config/logtail/logtail.log
+# 连接成功但没数据？多半是模式停在快捷(1h)——按 f 两次切全量回放
+```
+
 ## 测试
 
 ```bash

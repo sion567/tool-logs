@@ -97,6 +97,19 @@ fn state_path() -> PathBuf {
     config_dir().join("state.toml")
 }
 
+/// [v0.7.1] 无条件追加错误日志：panic/启动失败/配置错误都落
+/// `~/.config/logtail/logtail.log`——双击 exe 闪退时 stderr 一闪而过，这里永远有痕。
+pub fn append_error_log(msg: &str) {
+    let _ = fs::create_dir_all(config_dir());
+    let line = format!("[{}] {}
+", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config_dir().join("logtail.log"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
 pub fn load_state() -> Option<StateFile> {
     let s = fs::read_to_string(state_path()).ok()?;
     toml::from_str(&s).ok()

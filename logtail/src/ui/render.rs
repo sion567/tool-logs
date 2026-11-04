@@ -283,11 +283,21 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
         Span::raw(st.status_msg.clone())
     };
     // 计数放最前：窄终端截断时保住关键信息（提示语牺牲尾部）
+    // [v0.7.1] 连接正常但零日志：主动给出原因提示（最常见的"没数据"是 --since 滤掉了历史）
+    let mut extra = String::new();
+    if n == 0 && st.session_states.get(st.active_source.as_deref().unwrap_or("")) == Some(&crate::app::SessionState::Streaming) {
+        extra = match &st.mode {
+            crate::source::ModeVariant::Quick { since: Some(s) } => format!(
+                "  |  ⚠ 当前只回放最近 {s}，期间无日志。按 f 切全量回放全部历史，或 L 前移"
+            ),
+            _ => "  |  ⚠ 已连接但暂无日志，等待新输出…（按 L 回放更早）".into(),
+        };
+    }
     let line = Line::from(vec![
         Span::raw(format!("{n} 行 {hits} 匹配")),
         Span::raw("  |  "),
         msg_span,
-        Span::raw("  |  "),
+        Span::raw(format!("{extra}  |  ")),
         Span::styled(hint, Style::default().fg(Color::DarkGray)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
