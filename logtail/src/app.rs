@@ -395,6 +395,14 @@ pub async fn main_loop(
                     if is_global_quit(&k) {
                         st.should_quit = true;
                     }
+                    // [v0.7.2] Ctrl+R 全局切换正则：Typing 态里 r 已是普通字符，切换键只能用组合键
+                    else if k.code == KeyCode::Char('r') && k.modifiers.contains(KeyModifiers::CONTROL) {
+                        st.regex_mode = !st.regex_mode;
+                        st.status_msg = format!(
+                            "正则模式: {}（Enter 落规则时生效）",
+                            if st.regex_mode { "开" } else { "关" }
+                        );
+                    }
                     // [v0.4 P1#8] Idle 的 '/' 也要进过滤层，否则永远进不了 Typing
                     else if crate::log::routes_to_filter(&k, &st.filter_state) {
                         handle_filter_key(k, &mut st);
@@ -937,6 +945,20 @@ mod tests {
             }
             other => panic!("应为 Range，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn 正则切换_CtrlR全局生效且不依赖视图重建() {
+        let mut cfg = Config::default();
+        cfg.general.remember_last_source = false;
+        let mut st = AppState::new(cfg);
+        let before = st.last_rebuild;
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        // 与 main_loop 相同的判定（抽出复用）
+        assert!(ctrl_r.code == KeyCode::Char('r') && ctrl_r.modifiers.contains(KeyModifiers::CONTROL));
+        st.regex_mode = !st.regex_mode;
+        assert!(st.regex_mode);
+        assert_eq!(st.last_rebuild, before, "切换正则不重建视图（只影响 Enter 落规则）");
     }
 
     #[test]

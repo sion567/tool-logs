@@ -39,6 +39,14 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('e'), _) => st.pending = Some(PendingAction::Export), // [v0.7] 会话导出
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect),
         (KeyCode::Char('L'), _) => st.pending = Some(PendingAction::LoadEarlier), // Day7 打磨
+        // [v0.7.2] 非编辑态 r = 正则切换（输入态里 r 是字符；输入态用 Ctrl+R）
+        (KeyCode::Char('r'), KeyModifiers::NONE) => {
+            st.regex_mode = !st.regex_mode;
+            st.status_msg = format!(
+                "正则模式: {}（Enter 落规则时生效）",
+                if st.regex_mode { "开" } else { "关" }
+            );
+        }
         (KeyCode::Char('G'), _) => jump_latest(st),
         (KeyCode::Char('g'), KeyModifiers::SHIFT) => jump_latest(st),
         (KeyCode::Char(' '), _) => {
@@ -226,11 +234,13 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                     st.last_rebuild += 1;
                 }
 
-                KeyCode::Char('r') => {
-                    st.regex_mode = !st.regex_mode; // §14：r = 正则/文本切换
-                    st.filter_state = FilterState::Typing { input, cursor };
-                }
-                KeyCode::Char(c) if key.modifiers.is_empty() => {
+                // [v0.7.2] `r` 不再是正则切换键——它必须能作为普通字符输入
+                // （过滤词 "error" 里的 r 曾把正则来回切，字母打不进去）。
+                // 正则切换改用 Ctrl+R（全局，见 main_loop）或非编辑态的 r。
+                KeyCode::Char(c)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    // SHIFT 放行：否则大写字母根本无法输入（is_empty 会丢掉 Shift+E）
                     edit_insert(&mut input, &mut cursor, c); // 按字符计数，多字节安全
                     st.filter_state = FilterState::Typing { input, cursor };
                 }
@@ -262,6 +272,11 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
             KeyCode::Esc => {
                 st.filter_state = FilterState::Idle; // 清空过滤 → Idle
                 st.last_rebuild += 1;
+            }
+            // [v0.7.2] 非编辑态 r = 正则切换（r 不再是编辑键）
+            KeyCode::Char('r') => {
+                st.regex_mode = !st.regex_mode;
+                st.filter_state = FilterState::Active(fm);
             }
             _ => st.filter_state = FilterState::Active(fm), // 原样放回
         },
@@ -451,6 +466,64 @@ mod tests {
         handle_filter_key(esc(), &mut st);
         match st.filter_state {
             FilterState::Typing { input, .. } => assert_eq!(input, "[unclosed"),
+            other => panic!("应为 Typing，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 键盘_输入error字母r不再误触正则() {
+        // 用户真机反馈：/error 的 r 曾被当切换键，正则来回开关、字母打不进去
+        let mut st = test_state();
+        handle_filter_key(key('/'), &mut st);
+        for c in "error".chars() {
+            handle_filter_key(key(c), &mut st);
+        }
+        match &st.filter_state {
+            FilterState::Typing { input, cursor } => {
+                assert_eq!(input, "error", "r 必须作为字符输入");
+                assert_eq!(*cursor, 5);
+            }
+            other => panic!("应为 Typing，实际 {other:?}"),
+        }
+        assert!(!st.regex_mode, "打字母不得改变正则模式");
+        // Ctrl+R 才是切换（main_loop 全局层处理，此处只断言该键带 CONTROL）
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(ctrl_r.modifiers.contains(KeyModifiers::CONTROL));
+        // 回车落文本规则
+        handle_filter_key(enter(), &mut st);
+        assert_eq!(
+            st.filter_state,
+            FilterState::Active(FilterMode::Text("error".into()))
+        );
+    }
+
+    #[test]
+    fn 键盘_大写字母可输入_shift不丢键() {
+        // is_empty 守卫曾把 SHIFT+字母 丢弃——真实终端 Shift+E 是 Char('E')+SHIFT
+        let mut st = test_state();
+        handle_filter_key(key('/'), &mut st);
+        let shift_e = KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT);
+        handle_filter_key(shift_e, &mut st);
+        match &st.filter_state {
+            FilterState::Typing { input, .. } => assert_eq!(input, "E", "SHIFT+字母必须能输入"),
+            other => panic!("应为 Typing，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn 键盘_非编辑态r切换正则_编辑态r是字符() {
+        let mut st = test_state();
+        // Idle 态（normal 层）r 切换
+        handle_normal_key(key('r'), &mut st);
+        assert!(st.regex_mode, "Idle 态 r 切换正则");
+        handle_normal_key(key('r'), &mut st);
+        assert!(!st.regex_mode);
+        // 编辑态 r 是字符（不再切换）
+        handle_filter_key(key('/'), &mut st);
+        handle_filter_key(key('r'), &mut st);
+        assert!(!st.regex_mode, "编辑态 r 不得切换正则");
+        match &st.filter_state {
+            FilterState::Typing { input, .. } => assert_eq!(input, "r"),
             other => panic!("应为 Typing，实际 {other:?}"),
         }
     }
