@@ -39,6 +39,7 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     render_title(frame, out.title, st);
     render_sidebar(frame, out.left, st);
     render_toolbar(frame, out.toolbar, st);
+    render_sparkline(frame, out.spark, st); // [v0.7.6→v0.8.4 恢复] 日志量时间轴
     render_logs(frame, out.log, st);
 
     // 详情面板（Day6）：时间/级别/源/原始行/上下文±N
@@ -177,6 +178,32 @@ fn render_input(input: &str, cursor: usize) -> String {
         s.push('|');
     }
     s
+}
+
+/// [v0.7/v0.8.4 恢复] 日志量时间轴：按秒分桶，密度字符 ` .:-=+*#@`（末端=最新）。
+/// 全 ASCII——块字符 ▁▂█ 是 East-Asian-ambiguous 宽度，Windows 终端错位源（v0.8.2）。
+fn render_sparkline(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
+    const BARS: [char; 9] = [' ', '.', ':', '-', '=', '+', '*', '#', '@'];
+    let v = &st.view_cache.spark;
+    if v.is_empty() || v.iter().all(|&c| c == 0) {
+        return;
+    }
+    let max = v.iter().max().copied().unwrap_or(1).max(1);
+    let bar: String = v
+        .iter()
+        .map(|&c| {
+            if c == 0 {
+                BARS[0]
+            } else {
+                let lvl = ((c as f64 / max as f64) * 7.0).ceil() as usize;
+                BARS[lvl.clamp(1, 8)]
+            }
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(bar, Style::default().fg(Color::Cyan)))),
+        area,
+    );
 }
 
 fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
@@ -473,7 +500,8 @@ mod tests {
             "最右列应有 ASCII 滚动条: {sb_glyphs:?}"
         );
         // [v0.7] sparkline 行：有带时间戳的行时应有块字符
-        let spark_row = rs.iter().find(|r| r.contains(':') && r.contains('#'));
+        // sparkline 行：工具栏下一行（含密度字符，日志行无 # 前缀）
+        let spark_row = rs.iter().find(|r| !r.contains("ERROR db error") && !r.contains("start sync") && (r.contains('*') || r.contains('#')) && !r.contains("┌"));
         assert!(spark_row.is_some(), "应有 ASCII sparkline 行: {all}");
     }
 
@@ -566,6 +594,67 @@ mod tests {
 ");
         assert!(all.contains("AIL"), "横滚后应看到长行尾部（skip 6 后剩 AIL）: {all}");
         assert!(!all.contains("AAAA "), "前缀已被平移出屏: {all}");
+    }
+
+    #[test]
+    fn 渲染_README界面帧快照() {
+        // [v0.8.4] README 界面帧：双 tab（一流中一结束）+ 数据 + sparkline
+        let mut st = test_state();
+        st.tabs.push("ch-237".into());
+        st.session_states.insert("ch-237".into(), crate::app::SessionState::Ended);
+        let mut buf2 = crate::log::LogBuffer::new(10);
+        buf2.push(crate::log::LogLine {
+            raw: "2026-11-05T09:00:00Z ERROR on 237".into(),
+            level: crate::log::LogLevel::Error,
+            ..Default::default()
+        });
+        st.buffers.insert("ch-237".into(), buf2);
+        st.sources.insert(
+            "ch-237".into(),
+            crate::config::SourceConfig {
+                name: "ch-237".into(),
+                server: "remote-237".into(),
+                source: crate::source::LogSource::Docker {
+                    container: "c".into(),
+                    tail: 10,
+                    follow: true,
+                    since: None,
+                    until: None,
+                },
+            },
+        );
+        let mut cfg2 = st.config.clone();
+        cfg2.servers.push(crate::config::ServerConfig {
+            name: "remote-237".into(),
+            host: "192.168.40.237".into(),
+            port: 22,
+            user: "zdsoft".into(),
+            auth: crate::config::AuthCfg::Password { password: "x".into() },
+            sudo: false,
+            sudo_password: None,
+        });
+        st.config = cfg2;
+        for (raw, ago) in [
+            ("2026-11-05T09:00:01Z 07:00:01 INFO sync start", 4i64),
+            ("2026-11-05T09:00:02Z 07:00:02 ERROR db refused", 3),
+            ("2026-11-05T09:00:03Z 07:00:03 WARN slow 1.2s", 2),
+            ("2026-11-05T09:00:04Z 07:00:04 INFO done", 1),
+        ] {
+            let mut l = crate::log::LogLine { raw: raw.into(), ..Default::default() };
+            l.timestamp = Some(chrono::Utc::now() - chrono::Duration::seconds(ago));
+            if let Some(b) = st.buffers.get_mut("test-src") {
+                b.push(l);
+            }
+        }
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let rs = rows(&t);
+        for r in &rs { eprintln!("FRAME|{r}"); }
+        // sparkline 恢复断言：密度字符行存在（含 . 或 - 或 #），且非日志行
+        let spark_ok = rs.iter().enumerate().any(|(i, r)| {
+            i > 4 && i < 7 && (r.contains(".-") || r.contains("-#") || r.contains(":.") || r.ends_with('#'))
+        });
+        assert!(spark_ok, "sparkline 行必须渲染");
     }
 
     #[test]

@@ -360,7 +360,7 @@ pub fn handle_detail_key(key: KeyEvent, st: &mut AppState) {
         KeyCode::Char('c') | KeyCode::Char('C') => copy_selected(st),
         KeyCode::Char('t') | KeyCode::Char('T') => filter_by_trace(st),
         KeyCode::Char('p') | KeyCode::Char('P') => {
-            st.status_msg = "多 tab 同屏在 v0.5；当前会话已是单源视图".into()
+            st.status_msg = "tab 用 ,/. 切换；同屏分栏在路线图（v0.5.x）".into()
         }
         _ => {} // 其余已在 detail_consumes 排除，不会到这里
     }
@@ -406,6 +406,10 @@ fn truncate_for_status(s: &str) -> String {
 /// `C` 清屏（§14：只清显示标记，不断连）：记下当前末行 line_no，渲染层不再显示它之前的行
 fn clear_screen(st: &mut AppState) {
     let last = st.current_buffer().iter().last().map(|l| l.line_no);
+    if last.is_none() {
+        st.status_msg = "缓冲为空，无需清屏".into();
+        return;
+    }
     if let Some(no) = last {
         st.cleared_before = Some(no);
         st.selected_line_no = None;

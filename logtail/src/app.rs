@@ -42,6 +42,18 @@ pub enum SessionState {
     Failed,
 }
 
+impl SessionState {
+    /// [v0.8.4] 单字符状态符（ASCII 化，v0.8.2）：侧栏/tab 条共用一份
+    pub fn marker(self) -> &'static str {
+        match self {
+            SessionState::Connecting => "c",
+            SessionState::Streaming => "*",
+            SessionState::Ended => "x",
+            SessionState::Failed => "!",
+        }
+    }
+}
+
 /// [v0.4 P2#2] 命中缓存：生成时 last_rebuild 的值 + line_no 序列 + 日志量 sparkline
 #[derive(Debug, Default)]
 pub struct ViewCache {
@@ -271,13 +283,12 @@ impl AppState {
 
     /// [v0.7.6] 侧栏源行：状态标记 + 名称（●流中 ⟳连接中 ■结束 ✗失败 空白未连接）
     fn source_row(&self, sid: &str) -> String {
-        let marker = match self.session_states.get(sid).copied() {
-            Some(SessionState::Connecting) => "c",
-            Some(SessionState::Streaming) => "*",
-            Some(SessionState::Ended) => "x",
-            Some(SessionState::Failed) => "!",
-            None => " ",
-        };
+        let marker = self
+            .session_states
+            .get(sid)
+            .copied()
+            .map(SessionState::marker)
+            .unwrap_or(" ");
         format!("  {marker} {sid}")
     }
 
@@ -397,6 +408,19 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 /// 每帧"取下一批"的行数预算（§13 [v0.3 P2#9]）。只限制再取几批，绝不截断单批。
 const MAX_LINES_PER_FRAME: usize = 200;
 
+/// 单帧绘制（含错位自愈的 clear 逻辑）；[v0.8.4] 抽出供主循环与 pending 前置绘共用
+fn draw_frame(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    st: &mut AppState,
+) -> Result<()> {
+    if st.force_redraw {
+        st.force_redraw = false;
+        terminal.clear()?; // [v0.8.2] 全量重绘，修终端宽度错位
+    }
+    terminal.draw(|f| render(f, st))?;
+    Ok(())
+}
+
 pub async fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut st: AppState,
@@ -407,12 +431,7 @@ pub async fn main_loop(
             connect_source(&mut st, &sid).await;
         }
 
-        // [v0.8.2] 终端错位自愈：C 键触发全量重绘
-        if st.force_redraw {
-            st.force_redraw = false;
-            terminal.clear()?; // [v0.8.2] 全量重绘，修终端宽度错位
-        }
-        terminal.draw(|f| render(f, &mut st))?;
+        draw_frame(terminal, &mut st)?;
 
         // 1) 输入事件（§13 分发顺序：过滤层 > 详情层 > 正常层）
         if event::poll(Duration::from_millis(30))? {
@@ -445,6 +464,11 @@ pub async fn main_loop(
         }
 
         // 1.5) 执行输入层发起的异步动作（连接/预设/模式循环）
+        // [v0.8.4] 连接等动作 inline await 会阻塞循环——执行前先绘一帧，
+        // "连接 …" 状态立即可见（否则提示永远画不出来，界面冻结最多 20s）
+        if st.pending.is_some() {
+            draw_frame(terminal, &mut st)?;
+        }
         if let Some(action) = st.pending.take() {
             execute_pending(&mut st, action).await;
         }
@@ -601,6 +625,16 @@ async fn toggle_prefilter(st: &mut AppState) {
             }
         }
         None => {
+            // [v0.8.4] 本地源没有命令层，"推到远端"不适用——引导用本地过滤
+            if let Some(sid) = st.active_source.as_deref() {
+                if matches!(
+                    st.source_type_of(&sid.to_string()),
+                    crate::source::SourceType::LocalFile
+                ) {
+                    st.status_msg = "本地流无需远端预过滤：本地过滤即即时生效".into();
+                    return;
+                }
+            }
             let pat = match st.active_filter() {
                 crate::log::FilterMode::Text(t) => t.clone(),
                 crate::log::FilterMode::Regex(_, t) => t.clone(),

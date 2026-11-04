@@ -12,7 +12,7 @@ pub use load::{append_log, config_dir, load, load_state, save_state, StateFile};
 pub use server::{AuthCfg, ServerConfig};
 pub use source_cfg::SourceConfig;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub general: GeneralCfg,
