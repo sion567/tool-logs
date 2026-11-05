@@ -570,6 +570,23 @@ mod tests {
     }
 
     #[test]
+    fn 渲染_侧栏边框完整_无残留碎片() {
+        // [v0.8.5] 布局代码正确性验证：侧栏有完整边框（┌─┐│）、无单字符碎片列
+        let mut st = test_state();
+        let t = draw(&mut st);
+        let rs = rows(&t);
+        // 侧栏框顶在 y=3（标题 3 行之下），col 0 应是 ┌；内容行 col 0 是 │
+        assert_eq!(rs[3].chars().next().unwrap(), '┌', "侧栏框顶: {}", rs[3]);
+        assert_eq!(rs[4].chars().next().unwrap(), '│', "侧栏左框: {}", rs[4]);
+        assert_eq!(rs[4].chars().nth(23).unwrap(), '│', "侧栏右框: {}", rs[4]);
+        // 全屏无单字符碎片行（旧 bug 特征：一行只有一个字符）
+        for (i, r) in rs.iter().enumerate() {
+            let visible = r.trim().chars().count();
+            assert!(visible > 1 || r.trim().is_empty(), "y={i} 单字符碎片行: {r:?}");
+        }
+    }
+
+    #[test]
     fn 渲染_窄窗不溢出不碎片() {
         // [v0.8.5] 40x12 / 50x14（用户截图场景）/ 30x10：
         // 旧固定布局在此溢出——侧栏碎片/详情顶出屏幕/状态栏多行

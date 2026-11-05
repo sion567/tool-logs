@@ -395,7 +395,11 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
+    let mut terminal = Terminal::new(backend)?;
+    // [v0.8.5] 启动即清屏：换版本启动时终端缓冲里可能有旧版残留画面
+    // （alternate screen 理论上隔离了 scrollback，但同会话内换版本/异常退出的残留仍会出现）
+    terminal.clear()?;
+    Ok(terminal)
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
