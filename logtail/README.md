@@ -1,6 +1,6 @@
 # logtail — 远程日志查看工具
 
-基于 SSH 的终端日志查看器：连接远程服务器，把 docker / 文件 / systemd 的日志流拉到本地，实时过滤、着色、下钻——替代 `ssh + docker logs -f + grep`。设计与实现细节见 `../logtail-design.md`（v0.8.4）。
+基于 SSH 的终端日志查看器：连接远程服务器，把 docker / 文件 / systemd 的日志流拉到本地，实时过滤、着色、下钻——替代 `ssh + docker logs -f + grep`。设计与实现细节见 `../logtail-design.md`（v0.9.0）。
 
 ## 快速开始
 
@@ -37,6 +37,15 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 | `↑↓` / `Space` / `G` | 选择行 / 暂停跟随 / 跳最新 |
 | `Enter` | 锁定详情面板（`c` 复制 `t` trace 过滤 `q` 关闭） |
 | `e` | 导出当前源会话日志到 `.log` 文件（v0.7） |
+
+### 显示设置（v0.9，退出自动记住）
+
+| 键 | 功能 |
+|----|------|
+| `w` | 长行自动换行 开/关 |
+| `b` | 侧栏 显示/隐藏 |
+| `v` | 日志量时间轴 显示/隐藏 |
+| `h` | 状态栏键位提示 显示/隐藏 |
 | `C` / `L` / `R` | 清屏（不断连）/ 加载更早（Range 窗口平移）/ 重连 |
 | `q` | 退出 |
 
@@ -57,5 +66,5 @@ logtail --check-config   # 校验配置（语法/源→服务器引用），✔/
 ## 测试
 
 ```bash
-cargo test   # 43 个用例：单测 + TestBackend 渲染测试 + in-process sshd 集成测试（无需真实服务器）
+cargo test   # 82 个用例：单测（含 TestBackend 渲染/键位矩阵）+ in-process sshd 集成测试（无需真实服务器）
 ```

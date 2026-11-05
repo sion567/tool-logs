@@ -50,6 +50,24 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.9.1，文档↔代码一致性专项 II）
+
+v0.9.0 落地后全文档审计，修 10 处正文漂移（v0.5~v0.9 期间的快速迭代只更新了变更记录，正文伪代码/字段定义滞后）：
+
+| # | 位置 | 漂移 → 修复 |
+|---|------|------------|
+| 1 | §9 AppState | 缺 tabs（v0.5）/remote_prefilter（v0.6）/force_redraw（v0.8.2）/ui（v0.9）四字段、Viewport 缺 scroll_x/height、ViewCache 缺 spark → 全部镜像补齐 |
+| 2 | §12.2 layout 伪代码 | 还是 v0.4 的 Layout::default 约束求解版 → 替换为 v0.8.5/v0.9 手动精确计算最终版（含 MIN 守卫、ui 参数），并留演进史注 |
+| 3 | §13 主循环 | 缺全局组合键分支（Ctrl+C/Ctrl+R）、detail_consumes 精确消费、draw_frame/pending 前置绘 → 同步 |
+| 4 | §14 快捷键表 | 缺 w/b/v/h 显示设置四键；`C` 行补"强制全屏重绘"；`q` 行补侧栏语义 |
+| 5 | §12.1 示意 | 标题栏状态符 ●■ → */x，树形头 ▾ → v |
+| 6 | §8 配置格式 | 缺 [ui] 节示例、servers 缺 sudo/sudo_password 字段说明 → 补 |
+| 7 | USAGE | 版本头 v0.8.4→v0.9.0；--demo 补 LOGTAIL_SRC=local |
+| 8 | README | 引用 v0.8.4→v0.9.0；测试计数 43→82；键位表补显示设置节 |
+| 9 | §19 | （前轮已补 Loki 依赖行） |
+
+**复核一致项**：键位三方矩阵、导出格式、变更记录链 17 段、源类型表、§20 路线、状态符说明——全部通过。
+
 ## 变更记录（v0.9.0，路线图 v0.9 前半：UI 设置系统）
 
 用户提出"查看/缩放/状态栏/自动换行能否设置"——落地 **UI 显示设置系统**（§20 v0.9"主题系统"的设置部分）：
@@ -1204,6 +1222,16 @@ user = "root"
 auth = { type = "key", path = "~/.ssh/id_rsa" }        # ~ 由 expand_home 展开
 
 [[servers]]
+name = "root-box"
+host = "192.168.40.237"
+port = 22
+user = "zdsoft"
+auth = { type = "password", password = "…" }
+sudo = true                     # [v0.7.7/v0.8.1] 可选：远端命令加 sudo 前缀
+                                # 有 NOPASSWD → sudo -n；无 → sudo -S 复用 auth.password
+sudo_password = "…"             # 可选：sudo 密码与登录密码不同时显式指定
+
+[[servers]]
 name = "staging"
 host = "192.168.1.101"
 port = 22
@@ -1229,6 +1257,12 @@ source = { type = "docker", container = "nginx", tail = 200 }
 name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
+
+[ui]                            # [v0.9] UI 显示设置（热键 w/b/v/h 即时切换，退出经 state.toml 记住）
+wrap_long_lines = false         # 长行自动换行（false=截断+←→ 横滚）
+show_sparkline = true           # 日志量时间轴
+show_sidebar = true             # 侧栏（隐藏后日志区全宽）
+show_hints = true               # 状态栏键位提示
 
 [presets.quick_error]
 name = "仅ERROR(1h)"
@@ -1262,15 +1296,16 @@ pub enum SessionState {
 /// 源的逻辑 ID = config 里的 source.name（如 "prod-api"）。[v0.4 P2#6] 补定义，此前全文悬空。
 pub type SourceId = String;
 
-/// 非跟随态的滚动偏移（单位：行）。[v0.4 P2#3] 补定义，此前 Viewport 悬空。
+/// 非跟随态纵向偏移 + [v0.7.6] 横向偏移 + [v0.8.5] 日志区可视高度（输入层保证选中可见）
 #[derive(Debug, Default, Clone)]
-pub struct Viewport { pub scroll_y: u16 }
+pub struct Viewport { pub scroll_y: u16, pub scroll_x: u16, pub height: u16 }
 
-/// [v0.4 P2#2] 命中缓存：last_rebuild 变了才重算，渲染帧直接复用 hits。
+/// [v0.4 P2#2 / v0.7] 命中缓存：last_rebuild 变了才重算，渲染帧直接复用。
 #[derive(Debug, Default)]
 pub struct ViewCache {
     pub built_at: u64,   // 生成时 last_rebuild 的值
     pub hits: Vec<u64>,  // line_no 序列
+    pub spark: Vec<u64>, // [v0.7] 日志量 sparkline（随缓存刷新、缩放按宽度重算）
 }
 
 pub struct AppState {
@@ -1278,6 +1313,8 @@ pub struct AppState {
     pub connections: HashMap<SourceId, ActiveSession>,
     pub session_states: HashMap<SourceId, SessionState>,   // [v0.3 P2#10]
     pub active_source: Option<SourceId>,
+    /// [v0.5] 已连接源的 tab 顺序（含 Ended 终态，切换不拆流）
+    pub tabs: Vec<SourceId>,
     /// 当前模式：f 键循环、预设、L 加载更早都改它；to_command 的唯一入参
     /// [v0.4 三轮补：此前 ModeVariant 全文无处存放]
     pub mode: ModeVariant,
@@ -1298,6 +1335,9 @@ pub struct AppState {
     /// [v0.4 P2#2] 命中缓存，见 ViewCache
     pub view_cache: ViewCache,
 
+    // ---- UI 设置（[v0.9]，热键 w/b/v/h，退出持久化）----
+    pub ui: UiState,   // wrap_long_lines / show_sidebar / show_sparkline / show_hints
+
     // ---- 视图 ----
     pub selected_line_no: Option<u64>,     // 只认 line_no，不认下标
     pub detail_panel: Option<DetailPanel>,
@@ -1307,6 +1347,12 @@ pub struct AppState {
     pub sidebar: Sidebar,
 
     // ---- 其它 ----
+    /// [v0.6] 远端预过滤 pattern（P 键开关；命令尾接 | grep -E --line-buffered）
+    pub remote_prefilter: Option<String>,
+    /// [v0.8.2] C 键触发 terminal.clear() 全量重绘（终端宽度错位自愈）
+    pub force_redraw: bool,
+    /// [v0.8.4] 输入层挂起动作（连接/预设/模式循环）执行前的前置绘触发器
+    pub pending_draw: bool,
     pub config: Config,
     /// [v0.4 三轮] 预设列表（config 加载），侧栏渲染 + Enter 应用（§10）
     pub presets: Vec<Preset>,
@@ -1624,12 +1670,12 @@ pub fn routes_to_filter(k: &KeyEvent, fs: &FilterState) -> bool {
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ 标题栏: 远程日志查看器 v0.5.0  ●[prod-api] ●[nginx] ■[sys] │ ← 3 行 [v0.5] tab 条
+│ 标题栏: 远程日志查看器 v0.9.0 *[srs] [ch·已结束]        │ ← 3 行 [v0.8.7] 状态词
 ├────────────────┬───────────────────────────────────────────────┤
 │ 服务器 / 源     │ 模式:全量  级别:[ERROR▾]  过滤:[___] 正则:关 跟随:● │ ← 工具栏 1 行
 │                │ ▂▄█▅▂▁ ▃▄▂▁▁ …（[v0.7] 日志量 sparkline，1 行）       │
 │                │ ───────────────────────────────────────────── │
-│ ▾ prod-01      │ 14:02:01 INFO  start sync                     │
+│ v prod-01      │ 14:02:01 INFO  start sync                     │
 │   ▸ my-app     │ 14:02:02 INFO  listening :8080               │
 │   ▸ ffmpeg     │ 14:02:03 WARN  slow query 1.2s               │
 │   ▸ nginx      │ 14:02:04 ERROR db connection refused  ← 红   │
@@ -1742,23 +1788,37 @@ fn render_logs(frame: &mut Frame, area: Rect, st: &AppState, hits: &[u64]) {
 /// 绝不截断单批内部——截断半批就是又一次丢行 [v0.4 P0#2]。
 const MAX_LINES_PER_FRAME: usize = 200;   // [v0.3 P2#9]
 
-pub async fn main_loop(mut terminal: Terminal, mut st: AppState) -> anyhow::Result<()> {
+pub async fn main_loop(terminal: &mut Terminal, mut st: AppState) -> anyhow::Result<()> {
     loop {
-        terminal.draw(|f| render(f, &mut st))?;   // [v0.4 P2#2] render 需要 &mut：按需刷新命中缓存
+        draw_frame(terminal, &mut st)?;   // [v0.8.4] 单帧绘制抽取（含 [v0.8.2] force_redraw→clear 自愈）
 
-        // 1) 输入事件
+        // 1) 输入事件（[v0.7.2/v0.7.3/v0.7.5] 分发顺序：全局组合键 > 过滤层 > 详情层(精确消费) > 正常层）
         if event::poll(Duration::from_millis(30))? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    match () {
-                        // [v0.4 P1#8] Idle 的 '/' 也要进过滤层，否则永远进不了 Typing
-                        _ if routes_to_filter(&k, &st.filter_state) => handle_filter_key(k, &mut st),
-                        _ if st.detail_panel.is_some() => handle_detail_key(k, &mut st),
-                        _ => handle_normal_key(k, &mut st),
+                    // [v0.7.2] 全局组合键优先（任何层，含过滤 Typing 中）
+                    if is_global_quit(&k) {                       // Ctrl+C：退出
+                        st.should_quit = true;
+                    } else if matches!(k.code, Char('r') | Char('R'))
+                        && k.modifiers.contains(CONTROL) {
+                        st.regex_mode = !st.regex_mode;           // Ctrl+R：正则切换
+                    }
+                    // [v0.7.3/v0.7.5] 按状态精确消费、其余透传（键位劫持系列修复）
+                    else if routes_to_filter(&k, &st.filter_state) {
+                        handle_filter_key(k, &mut st);
+                    } else if st.detail_panel.is_some() && detail_consumes(&k) {
+                        handle_detail_key(k, &mut st);
+                    } else {
+                        handle_normal_key(k, &mut st);
                     }
                 }
             }
         }
+
+        // 1.5) [v0.8.4] 执行输入层挂起动作前先绘一帧——
+        //      连接 inline await 最长 20s，"连接 …"提示必须先画出来
+        if st.pending.is_some() { draw_frame(terminal, &mut st)?; }
+        if let Some(action) = st.pending.take() { execute_pending(&mut st, action).await; }
 
         // 2) 后台收流
         //    [v0.4 P1#4] 先快照 sid：v0.3 的 iter_mut 全程持有 &mut st.connections，
@@ -1847,12 +1907,16 @@ pub async fn main_loop(mut terminal: Terminal, mut st: AppState) -> anyhow::Resu
 | `Enter` | 连接选中源 / 应用选中预设 | 侧栏 | 连接=新建会话；预设=`Preset::apply`（§10） |
 | `Enter` | 锁定详情面板 | 正常 | |
 | `c` | 复制选中行原文 | 详情 | 调系统剪贴板 crate |
-| `C` | 清屏（只清显示标记，不断连） | 正常 | 与 `c` 分键，不再冲突 |
+| `C` | 清屏 + **强制全屏重绘** [v0.8.2] | 正常 | 终端宽度错位/残留画面时按 `C` 即时恢复；与 `c` 分键 |
 | `t` | 按 `trace_id` 过滤 | 详情 | 需该行解析出 trace_id |
 | `p` | 只看该源 | 详情 | |
 | `L` | 加载更早（since 前移；Full→24h、Quick 翻倍、Range 窗口平移 [v0.7]） | 正常 | 重建会话 |
 | `R` | 重连 | 全局 | 先 `shutdown` 旧会话 |
-| `q` | 退出 | 全局 | `KeyCode::Char('q')`，与 `Esc` 分支不同 |
+| `q` | 退出 | 日志区 | [v0.7.5] 侧栏聚焦时 `q` 只退出侧栏（误按不杀程序） |
+| `w` | 长行自动换行 开/关 | 正常 | [v0.9] 开=折行看全文；关=截断+`←→` 横滚 |
+| `b` | 侧栏 显示/隐藏 | 正常 | [v0.9] 隐藏后日志区全宽；`Tab` 自动先显示再聚焦 |
+| `v` | 日志量时间轴 显示/隐藏 | 正常 | [v0.9] |
+| `h` | 状态栏键位提示 显示/隐藏 | 正常 | [v0.9] |
 | `KeyCode::Esc` | 取消/清空 | 全局 | 不是字符 `'q'` |
 
 > 旧版 `C` 既"复制"又"清屏"已拆开；`1..4` 与 `LogLevel` 序号方向（Error=4…Debug=1）不同，

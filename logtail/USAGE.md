@@ -1,7 +1,7 @@
 # logtail 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
-> 当前版本：v0.8.4
+> 当前版本：v0.9.0
 
 ---
 
@@ -273,7 +273,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 ```bash
 LOGTAIL_HOST=192.168.40.198 LOGTAIL_USER=xxm LOGTAIL_PASS='密码' \
 LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" \
-LOGTAIL_SRC=docker \        # docker / file / journal，决定是否拆 docker JSON 包壳
+LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地文件泵，不经 SSH）
 ./logtail --demo
 ```
 
