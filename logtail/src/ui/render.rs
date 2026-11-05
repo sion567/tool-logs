@@ -13,8 +13,28 @@ use crate::log::{rebuild_view, FilterMode};
 use crate::ui::layout::layout;
 
 pub fn render(frame: &mut Frame, st: &mut AppState) {
+    let area = frame.size();
+    // [v0.8.5] 最小尺寸守卫：窄窗下固定布局会溢出绘制（碎片/面板顶出屏幕）——
+    // 全屏单条提示，杜绝一切溢出渲染
+    if area.width < crate::ui::layout::MIN_WIDTH || area.height < crate::ui::layout::MIN_HEIGHT {
+        let msg = format!(
+            "终端太小（{}x{}）：至少 {}x{} 才能显示，请拉大窗口",
+            area.width, area.height, crate::ui::layout::MIN_WIDTH, crate::ui::layout::MIN_HEIGHT
+        );
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(ratatui::text::Line::from(ratatui::text::Span::styled(
+                msg,
+                ratatui::style::Style::default()
+                    .fg(ratatui::style::Color::Red)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )))
+            .alignment(ratatui::layout::Alignment::Center),
+            area,
+        );
+        return;
+    }
     // [v0.4 P1#6] has_detail 从状态取
-    let out = layout(frame.size(), st.detail_panel.is_some());
+    let out = layout(area, st.detail_panel.is_some());
 
     // 日志区高度记录给输入层（↑↓ 保证选中行可见需要知道窗口大小）
     st.viewport.height = out.log.height;
@@ -547,6 +567,43 @@ mod tests {
             }
         }
         assert!(found, "应渲染出命中行");
+    }
+
+    #[test]
+    fn 渲染_窄窗不溢出不碎片() {
+        // [v0.8.5] 40x12 / 50x14（用户截图场景）/ 30x10：
+        // 旧固定布局在此溢出——侧栏碎片/详情顶出屏幕/状态栏多行
+        for (w, h) in [(40u16, 12u16), (50, 14), (30, 10)] {
+            let mut st = test_state();
+            st.detail_panel = Some(crate::app::DetailPanel { line_no: 1, context_before: 5, context_after: 5 });
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut t = ratatui::Terminal::new(backend).unwrap();
+            t.draw(|f| render(f, &mut st)).unwrap();
+            let buf = t.backend().buffer();
+            let all: String = (0..buf.area.height)
+                .flat_map(|y| (0..buf.area.width).map(move |x| (x, buf.get(x, y).symbol())))
+                .map(|(_, s)| s)
+                .collect();
+            // 窄于最小尺寸 → 全屏提示
+            if w < 40 || h < 12 {
+                let flat: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(flat.contains("终端太小"), "{w}x{h} 应显示提示: {all}");
+                continue;
+            }
+            // 40x12：状态栏在最后一行（不被详情面板顶出屏幕）
+            let last_row: String = (0..buf.area.width)
+                .map(|x| buf.get(x, buf.area.height - 1).symbol())
+                .collect();
+            assert!(last_row.contains("行"), "{w}x{h} 最后一行应为状态栏: {last_row:?}");
+            // 侧栏区域（col 1..side_w）无日志内容污染
+            let side_w = 24.min(w.saturating_sub(12)).max(10);
+            for y in 0..buf.area.height {
+                let row: String = (0..side_w.saturating_sub(1))
+                    .map(|x| buf.get(x, y).symbol())
+                    .collect();
+                assert!(!row.contains("zdhr"), "{w}x{h} y={y} 侧栏被日志污染: {row:?}");
+            }
+        }
     }
 
     #[test]
