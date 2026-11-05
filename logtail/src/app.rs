@@ -43,13 +43,26 @@ pub enum SessionState {
 }
 
 impl SessionState {
-    /// [v0.8.4] 单字符状态符（ASCII 化，v0.8.2）：侧栏/tab 条共用一份
-    pub fn marker(self) -> &'static str {
+    /// [v0.8.4→v0.8.7] 状态标注：
+    /// - 流中：`*` 前缀（最常见，保持简洁）
+    /// - 非流中：中文状态词（用户反馈单字符 x/c 看不懂）
+    ///
+    /// 全中文/ASCII 混排无 ambiguous 宽度符号，不引入 v0.8.2 的错位问题
+    pub fn tab_label(self) -> &'static str {
         match self {
-            SessionState::Connecting => "c",
+            SessionState::Connecting => "·连接中",
+            SessionState::Streaming => "",
+            SessionState::Ended => "·已结束",
+            SessionState::Failed => "·失败",
+        }
+    }
+
+    pub fn row_label(self) -> &'static str {
+        match self {
+            SessionState::Connecting => "连接中",
             SessionState::Streaming => "*",
-            SessionState::Ended => "x",
-            SessionState::Failed => "!",
+            SessionState::Ended => "已结束",
+            SessionState::Failed => "失败",
         }
     }
 }
@@ -283,13 +296,11 @@ impl AppState {
 
     /// [v0.7.6] 侧栏源行：状态标记 + 名称（●流中 ⟳连接中 ■结束 ✗失败 空白未连接）
     fn source_row(&self, sid: &str) -> String {
-        let marker = self
-            .session_states
-            .get(sid)
-            .copied()
-            .map(SessionState::marker)
-            .unwrap_or(" ");
-        format!("  {marker} {sid}")
+        let state = self.session_states.get(sid).copied();
+        match state {
+            Some(s) => format!("  {} {sid}", s.row_label()),
+            None => format!("      {sid}"),
+        }
     }
 
     /// [v0.5] 在已连接 tab 间循环切换（, 前一个 / . 后一个），不拆流
