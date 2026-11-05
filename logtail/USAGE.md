@@ -84,6 +84,12 @@ name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
 
+[ui]                          # UI 显示设置（v0.9；热键 w/b/v/h 切换，退出自动记住）
+wrap_long_lines = false       # 长行自动换行（true=折行看全文；false=截断+←→ 横滚）
+show_sparkline = true         # 日志量时间轴
+show_sidebar = true           # 侧栏（隐藏后日志区全宽，b 键切回）
+show_hints = true             # 状态栏键位提示
+
 [presets.quick_error]         # 预设：侧栏一键应用的过滤组合
 name = "仅ERROR(1h)"
 level = "error"               # error / warn / info / debug
@@ -332,6 +338,10 @@ logtail 会自动剥除远端 ANSI 转义序列再显示（真机验证过）；
 
 **Q：配置里的密码明文存着安全吗？**
 配置文件依赖文件权限保护（建议 `chmod 600`）。当前版本不做系统密钥环集成（设计文档 §16.3 有迁移计划）。`command` 类型源完全跳过校验，仅在完全信任时使用。
+
+**Q：想放大字体/缩放界面？**
+TUI 程序无法控制字号——用终端自带的缩放：Windows Terminal `Ctrl+加号/减号` 或 `Ctrl+滚轮`。
+程序侧能做的是**显示密度设置**：`b` 隐藏侧栏、`v` 隐藏时间轴、`h` 隐藏键位提示——日志区可以拿到接近全屏的空间（v0.9，退出自动记住）。
 
 **Q：Windows 终端下跑？**
 支持。建议 Windows Terminal；Ctrl+C 退出、中文渲染正常。首次构建若很慢属正常（全量依赖编译）。

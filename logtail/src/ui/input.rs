@@ -72,7 +72,40 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('3'), _) => set_level(st, LevelFilter::Info),
         (KeyCode::Char('4'), _) => set_level(st, LevelFilter::Debug),
         (KeyCode::Char('0'), _) => set_level(st, LevelFilter::All),
+        // [v0.9] UI 显示设置热键
+        (KeyCode::Char('w'), _) => {
+            st.ui.wrap_long_lines = !st.ui.wrap_long_lines;
+            st.status_msg = format!(
+                "自动换行: {}",
+                if st.ui.wrap_long_lines { "开（长行折行显示全文）" } else { "关（截断+←→ 横滚）" }
+            );
+        }
+        (KeyCode::Char('b'), _) => {
+            st.ui.show_sidebar = !st.ui.show_sidebar;
+            if !st.ui.show_sidebar {
+                st.sidebar.focus = false;
+            }
+            st.status_msg = format!(
+                "侧栏: {}",
+                if st.ui.show_sidebar { "显示" } else { "隐藏（日志区全宽）" }
+            );
+        }
+        (KeyCode::Char('v'), _) => {
+            st.ui.show_sparkline = !st.ui.show_sparkline;
+            st.status_msg = format!("时间轴: {}", if st.ui.show_sparkline { "显示" } else { "隐藏" });
+        }
+        (KeyCode::Char('h'), _) => {
+            st.ui.show_hints = !st.ui.show_hints;
+            st.status_msg = format!(
+                "键位提示: {}",
+                if st.ui.show_hints { "显示" } else { "隐藏（状态栏更清爽）" }
+            );
+        }
         (KeyCode::Tab, _) => {
+            // [v0.9] 侧栏隐藏时先显示再聚焦
+            if !st.ui.show_sidebar {
+                st.ui.show_sidebar = true;
+            }
             st.sidebar.focus = true;
             st.status_msg = "侧栏聚焦：↑↓ 选择，Enter 连接/应用预设，Tab 返回".into();
         }
@@ -700,6 +733,36 @@ mod tests {
             FilterState::Typing { cursor, .. } => assert_eq!(*cursor, 2),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn 键盘_UI设置热键_wbvh() {
+        // [v0.9]
+        let mut st = test_state();
+        assert!(!st.ui.wrap_long_lines);
+        handle_normal_key(key('w'), &mut st);
+        assert!(st.ui.wrap_long_lines, "w 切换换行");
+        handle_normal_key(key('b'), &mut st);
+        assert!(!st.ui.show_sidebar, "b 隐藏侧栏");
+        handle_normal_key(key('v'), &mut st);
+        assert!(!st.ui.show_sparkline, "v 隐藏时间轴");
+        handle_normal_key(key('h'), &mut st);
+        assert!(!st.ui.show_hints, "h 隐藏键位提示");
+        // 再按全部切回
+        for c in "wbvh".chars() {
+            handle_normal_key(key(c), &mut st);
+        }
+        assert!(st.ui.show_sidebar && st.ui.show_sparkline && st.ui.show_hints);
+        assert!(!st.ui.wrap_long_lines);
+    }
+
+    #[test]
+    fn 键盘_侧栏隐藏时Tab先显示再聚焦() {
+        let mut st = test_state();
+        st.ui.show_sidebar = false;
+        handle_normal_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut st);
+        assert!(st.ui.show_sidebar, "侧栏隐藏时 Tab 自动显示");
+        assert!(st.sidebar.focus, "并聚焦");
     }
 
     #[test]

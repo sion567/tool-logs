@@ -34,7 +34,7 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
         return;
     }
     // [v0.4 P1#6] has_detail 从状态取
-    let out = layout(area, st.detail_panel.is_some());
+    let out = layout(area, st.detail_panel.is_some(), &st.ui);
 
     // 日志区高度记录给输入层（↑↓ 保证选中行可见需要知道窗口大小）
     st.viewport.height = out.log.height;
@@ -57,9 +57,14 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     }
 
     render_title(frame, out.title, st);
-    render_sidebar(frame, out.left, st);
+    // [v0.9] 侧栏/sparkline 可隐藏（b/v 热键）
+    if st.ui.show_sidebar {
+        render_sidebar(frame, out.left, st);
+    }
     render_toolbar(frame, out.toolbar, st);
-    render_sparkline(frame, out.spark, st); // [v0.7.6→v0.8.4 恢复] 日志量时间轴
+    if st.ui.show_sparkline {
+        render_sparkline(frame, out.spark, st); // [v0.7.6→v0.8.4 恢复] 日志量时间轴
+    }
     render_logs(frame, out.log, st);
 
     // 详情面板（Day6）：时间/级别/源/原始行/上下文±N
@@ -275,7 +280,12 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     }
     // [v0.7.6] 横向滚动：ratatui 的 scroll.x 仅在 wrap 模式生效（非 wrap 被忽略），
     // 改为渲染前对 raw 做字符级 skip——级别前缀固定不动，长行尾部随 ←/→ 可见
-    frame.render_widget(Paragraph::new(lines), area);
+    // [v0.9] wrap_long_lines：长行折行显示全文；关闭=截断+←→横滚
+    let mut para = Paragraph::new(lines);
+    if st.ui.wrap_long_lines {
+        para = para.wrap(ratatui::widgets::Wrap { trim: false });
+    }
+    frame.render_widget(para, area);
     // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置
     let mut sb_state = ScrollbarState::new(len).position(start);
     frame.render_stateful_widget(
@@ -360,13 +370,17 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
             _ => "  |  ! 已连接但暂无日志，等待新输出…（按 L 回放更早）".into(),
         };
     }
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::raw(format!("{n} 行 {hits} 匹配")),
         Span::raw("  |  "),
         msg_span,
-        Span::raw(format!("{extra}  |  ")),
-        Span::styled(hint, Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    // [v0.9] 键位提示可隐藏（h 键）
+    if st.ui.show_hints {
+        spans.push(Span::raw(format!("{extra}  |  ")));
+        spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+    }
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -584,6 +598,24 @@ mod tests {
             let visible = r.trim().chars().count();
             assert!(visible > 1 || r.trim().is_empty(), "y={i} 单字符碎片行: {r:?}");
         }
+    }
+
+    #[test]
+    fn 渲染_自动换行开关() {
+        // [v0.9] w 热键：wrap=true 时长行折行（后半段出现在下一屏行）
+        let mut st = test_state();
+        let long = format!("HEAD-{}-TAIL", "x".repeat(80));
+        let mut l = crate::log::LogLine { raw: long, ..Default::default() };
+        l.source = "test-src".into();
+        if let Some(b) = st.buffers.get_mut("test-src") {
+            b.push(l);
+        }
+        st.ui.wrap_long_lines = true;
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join("
+");
+        assert!(all.contains("TAIL"), "wrap 后长行尾部应可见: {all}");
     }
 
     #[test]

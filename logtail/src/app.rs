@@ -67,6 +67,26 @@ impl SessionState {
     }
 }
 
+/// [v0.9] UI 显示设置（运行时值）：热键 w/b/v/h 切换，退出经 state.toml 持久化
+#[derive(Debug, Clone)]
+pub struct UiState {
+    pub wrap_long_lines: bool,
+    pub show_sidebar: bool,
+    pub show_sparkline: bool,
+    pub show_hints: bool,
+}
+
+impl UiState {
+    pub(crate) fn from_config(cfg: &crate::config::UiCfg) -> Self {
+        Self {
+            wrap_long_lines: cfg.wrap_long_lines,
+            show_sidebar: cfg.show_sidebar,
+            show_sparkline: cfg.show_sparkline,
+            show_hints: cfg.show_hints,
+        }
+    }
+}
+
 /// [v0.4 P2#2] 命中缓存：生成时 last_rebuild 的值 + line_no 序列 + 日志量 sparkline
 #[derive(Debug, Default)]
 pub struct ViewCache {
@@ -160,6 +180,8 @@ pub struct AppState {
     /// [v0.8.2] 终端错位自愈：C 键触发 terminal.clear() 全量重绘
     /// （ratatui diff 模型在终端宽度错位后无法自愈，clear 是唯一手段）
     pub force_redraw: bool,
+    /// [v0.9] UI 显示设置（热键 w/b/v/h，退出持久化）
+    pub ui: UiState,
     /// [v0.6 §16.6] 远程预过滤 pattern：Some 时命令尾接 | grep -E --line-buffered
     pub remote_prefilter: Option<String>,
     pub status_msg: String,
@@ -186,6 +208,8 @@ impl AppState {
         // remember_last_source（§8）：恢复模式 + 自动连接目标
         let mut autostart = None;
         let mut mode = ModeVariant::default();
+        let (mut st_ui_wrap, mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints) =
+            (None, None, None, None);
         if config.general.remember_last_source {
             if let Some(state) = load_state() {
                 if let Some(sid) = state.last_source.clone() {
@@ -194,6 +218,11 @@ impl AppState {
                     }
                 }
                 mode = restore_mode(&state);
+                // [v0.9] UI 设置热切换持久化恢复（Some 覆盖）
+                if let Some(v) = state.ui_wrap { st_ui_wrap = Some(v); }
+                if let Some(v) = state.ui_sidebar { st_ui_sidebar = Some(v); }
+                if let Some(v) = state.ui_sparkline { st_ui_sparkline = Some(v); }
+                if let Some(v) = state.ui_hints { st_ui_hints = Some(v); }
             }
         }
 
@@ -216,6 +245,14 @@ impl AppState {
             viewport: Viewport::default(),
             following: true,
             sidebar: Sidebar::default(),
+            ui: {
+                let mut ui = UiState::from_config(&config.ui);
+                if let Some(v) = st_ui_wrap { ui.wrap_long_lines = v; }
+                if let Some(v) = st_ui_sidebar { ui.show_sidebar = v; }
+                if let Some(v) = st_ui_sparkline { ui.show_sparkline = v; }
+                if let Some(v) = st_ui_hints { ui.show_hints = v; }
+                ui
+            },
             config,
             autostart,
             pending: None,
@@ -331,21 +368,28 @@ impl AppState {
         }
     }
 
-    /// 记住当前源与模式（退出时调用）
+    /// 记住 UI 设置与当前源/模式（退出时调用）。
+    /// [v0.9] UI 设置无条件持久化；源/模式仍受 remember_last_source 门控。
     pub fn persist_state(&self) {
-        if !self.config.general.remember_last_source {
-            return;
-        }
         let (mode, since) = match &self.mode {
             ModeVariant::Full => ("full".to_string(), None),
             ModeVariant::Quick { since } => ("quick".to_string(), since.clone()),
             // Range 的时间戳次日已过期，持久化成 Full 而不是失效的窗口
             ModeVariant::Range(_, _) => ("full".to_string(), None),
         };
+        let last_source = if self.config.general.remember_last_source {
+            self.active_source.clone()
+        } else {
+            None
+        };
         save_state(&StateFile {
-            last_source: self.active_source.clone(),
+            last_source,
             mode: Some(mode),
             since,
+            ui_wrap: Some(self.ui.wrap_long_lines),
+            ui_sidebar: Some(self.ui.show_sidebar),
+            ui_sparkline: Some(self.ui.show_sparkline),
+            ui_hints: Some(self.ui.show_hints),
         });
     }
 }

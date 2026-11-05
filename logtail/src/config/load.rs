@@ -103,6 +103,15 @@ pub struct StateFile {
     /// "full" | "quick" | "range"
     pub mode: Option<String>,
     pub since: Option<String>,
+    /// [v0.9] UI 显示设置热切换后的持久化（Some 覆盖 config 默认）
+    #[serde(default)]
+    pub ui_wrap: Option<bool>,
+    #[serde(default)]
+    pub ui_sidebar: Option<bool>,
+    #[serde(default)]
+    pub ui_sparkline: Option<bool>,
+    #[serde(default)]
+    pub ui_hints: Option<bool>,
 }
 
 fn state_path() -> PathBuf {
@@ -166,6 +175,22 @@ auth={type=\"password\",password=\"x\"}",
         )
         .unwrap();
         assert!(!cfg2.servers[0].sudo, "缺省 false");
+    }
+
+    #[test]
+    fn ui配置节解析与缺省() {
+        // [v0.9] [ui] 节：显式值生效；缺省 wrap=false 其余 true
+        let t = r#"
+[ui]
+wrap_long_lines = true
+show_sidebar = false
+"#;
+        let cfg: Config = toml::from_str(t).unwrap();
+        assert!(cfg.ui.wrap_long_lines);
+        assert!(!cfg.ui.show_sidebar);
+        assert!(cfg.ui.show_sparkline && cfg.ui.show_hints, "未设置的取缺省");
+        let cfg2: Config = toml::from_str("default_tail = 1").unwrap();
+        assert!(!cfg2.ui.wrap_long_lines && cfg2.ui.show_hints);
     }
 
     #[test]
