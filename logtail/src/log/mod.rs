@@ -8,8 +8,8 @@ pub mod parser;
 pub use buffer::LogBuffer;
 pub use color::colorize;
 pub use filter::{
-    active_filter_of, matches_filter, rebuild_view, routes_to_filter, edit_backspace, edit_insert,
-    FilterMode, FilterState, LevelFilter, NO_FILTER,
+    active_filter_of, matches_filter, rebuild_view, routes_to_filter, text_patterns,
+    edit_backspace, edit_insert, FilterMode, FilterState, LevelFilter, NO_FILTER,
 };
 pub use parser::{detect_level, parse_line};
 
@@ -29,6 +29,8 @@ pub struct LogLine {
     pub timestamp: Option<DateTime<Utc>>,
     /// 逻辑源名，如 "prod-01/my-app"
     pub source: String,
+    /// [v0.10] 消息体：raw 剥掉行首时间戳 token 后的剩余（相似行折叠的去重键）
+    pub body: String,
     pub trace_id: Option<String>,
     pub fields: HashMap<String, String>,
     /// 单调递增，全局唯一身份（§5.1 不变式①：UI/过滤/详情只认它）

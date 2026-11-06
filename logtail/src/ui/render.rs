@@ -246,12 +246,30 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
 
     let fm = st.active_filter().clone();
     let mut lines = Vec::with_capacity(slice.len());
-    for &no in slice {
-        let line = match st.current_buffer().by_line_no(no) {
-            Some(l) => l,
-            None => continue, // 已淘汰：缓存比 buffer 旧一拍，下帧重建
+    // [v0.10] 相似行折叠：连续相同消息体（剥时间戳后）合并为一行，行尾 ` ×N`
+    let mut idx = 0usize;
+    while idx < slice.len() {
+        let no = slice[idx];
+        let Some(line) = st.current_buffer().by_line_no(no) else {
+            idx += 1;
+            continue;
         };
-        let selected = Some(no) == st.selected_line_no;
+        // 向后吞并 body 相同的相邻行
+        let mut group = 1usize;
+        if st.ui.dedupe {
+            while idx + group < slice.len() {
+                let Some(next) = st.current_buffer().by_line_no(slice[idx + group]) else { break };
+                if !line.body.is_empty() && next.body == line.body && next.level == line.level {
+                    group += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        let count = group;
+        let selected =
+            slice[idx..idx + count].iter().any(|&n| Some(n) == st.selected_line_no);
+        idx += count;
         let base = Style::default().fg(line.level.color());
         let mut spans = vec![Span::styled(
             format!("{} ", line.level.label()),
@@ -262,10 +280,15 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
             },
         )];
         // 关键词反白（过滤文本高亮，§12.3）；[v0.7.6] 横滚：raw 跳过前 scroll_x 字符
+        // [v0.10] 折叠组 >1 时行尾追加 ×N
+        let suffix = if count > 1 { format!("  ×{count}") } else { String::new() };
         let raw_view: String = if st.viewport.scroll_x > 0 {
-            line.raw.chars().skip(st.viewport.scroll_x as usize).collect()
+            format!(
+                "{}{suffix}",
+                line.raw.chars().skip(st.viewport.scroll_x as usize).collect::<String>()
+            )
         } else {
-            line.raw.clone()
+            format!("{}{suffix}", line.raw)
         };
         for (seg, matched) in split_matches(&raw_view, &fm) {
             let style = match (matched, selected) {
@@ -304,20 +327,40 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
     match fm {
         FilterMode::None => vec![(text, false)],
         FilterMode::Text(t) => {
-            if t.is_empty() {
+            // [v0.10] 多关键词：全部命中区间合并后高亮（重叠取并集）
+            let patterns = crate::log::text_patterns(t);
+            if patterns.is_empty() || patterns.iter().all(|p| p.is_empty()) {
                 return vec![(text, false)];
             }
-            let mut out = Vec::new();
-            let mut rest = text;
-            while let Some(pos) = rest.find(t) {
-                if pos > 0 {
-                    out.push((&rest[..pos], false));
+            let chars: Vec<(usize, char)> = text.char_indices().collect();
+            let len = text.len();
+            let mut hit = vec![false; len];
+            for p in &patterns {
+                let mut start = 0;
+                while let Some(pos) = text[start..].find(p) {
+                    let b = start + pos;
+                    for h in &mut hit[b..(b + p.len()).min(len)] {
+                        *h = true;
+                    }
+                    start = b + p.len().max(1);
                 }
-                out.push((&rest[pos..pos + t.len()], true));
-                rest = &rest[pos + t.len()..];
             }
-            if !rest.is_empty() {
-                out.push((rest, false));
+            let _ = &chars;
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < len {
+                let h = hit[i];
+                let mut j = i;
+                while j < len && hit[j] == h {
+                    j += 1;
+                }
+                // UTF-8 字符边界对齐（相对/绝对偏移 bug 修复：直接推进到边界）
+                let mut seg_end = j.min(len);
+                while seg_end < len && !text.is_char_boundary(seg_end) {
+                    seg_end += 1;
+                }
+                out.push((&text[i..seg_end], h));
+                i = seg_end;
             }
             out
         }
@@ -619,6 +662,95 @@ mod tests {
     }
 
     #[test]
+    fn 渲染_多关键词全部反白() {
+        // [v0.10] 'timeout|db' 两词都命中同一行 → 各自反白
+        let mut st = test_state();
+        let mut buf = crate::log::LogBuffer::new(10);
+        let mut l = crate::log::LogLine {
+            raw: "db error: timeout on connection".into(),
+            level: crate::log::LogLevel::Error,
+            body: "db error: timeout on connection".into(),
+            ..Default::default()
+        };
+        l.source = "test-src".into();
+        buf.push(l);
+        st.buffers.insert("test-src".into(), buf);
+        st.filter_state = crate::log::FilterState::Active(crate::log::FilterMode::Text(
+            "timeout|db".into(),
+        ));
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let buf = t.backend().buffer();
+        // 找日志行，断言 "db" 与 "timeout" 两个片段都 REVERSED
+        let mut db_rev = false;
+        let mut to_rev = false;
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf.get(x, y).symbol()).collect();
+            if !row.contains("db error") {
+                continue;
+            }
+            // [v0.10] row 每列一 symbol（char index == 列），find 的字节偏移须转列——
+            // 侧栏含 CJK 时字节偏移 > 列（v0.8.5 教训的同族问题）
+            let col_of = |b: usize| row[..b].chars().count();
+            if let Some(b) = row.find("db") {
+                let col = col_of(b) as u16;
+                if buf.get(col + 1, y).modifier.contains(ratatui::style::Modifier::REVERSED) {
+                    db_rev = true;
+                }
+            }
+            if let Some(b) = row.find("timeout") {
+                let col = col_of(b) as u16;
+                if buf.get(col + 1, y).modifier.contains(ratatui::style::Modifier::REVERSED) {
+                    to_rev = true;
+                }
+            }
+        }
+        assert!(db_rev && to_rev, "两个关键词都要反白 db_rev={db_rev} to_rev={to_rev}");
+        for y in 0..buf.area.height {
+            let row: String = (0..buf.area.width).map(|x| buf.get(x, y).symbol()).collect();
+            if row.contains("db error") {
+                let marks: String = (0..buf.area.width)
+                    .map(|x| if buf.get(x, y).modifier.contains(ratatui::style::Modifier::REVERSED) { 'R' } else { '.' })
+                    .collect();
+                eprintln!("DBG|{row}");
+                eprintln!("MRK|{marks}");
+            }
+        }
+    }
+
+    #[test]
+    fn 渲染_相似行折叠() {
+        // [v0.10] 连续相同消息体 → 1 行 + ×N；组内选中仍高亮代表行
+        let mut st = test_state();
+        let mut buf = crate::log::LogBuffer::new(10);
+        for i in 0..4 {
+            let mut l = crate::log::LogLine {
+                raw: format!("2026-11-05T00:16:2{i}Z retry attempt"),
+                body: "retry attempt".into(), // 时间戳不同、消息体相同
+                ..Default::default()
+            };
+            l.source = "test-src".into();
+            buf.push(l);
+        }
+        buf.push(crate::log::LogLine { raw: "different".into(), body: "different".into(), ..Default::default() });
+        st.buffers.insert("test-src".into(), buf);
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join("
+");
+        assert!(all.contains("retry attempt"), "折叠行显示消息体: {all}");
+        assert!(all.contains("×4"), "行尾 ×4: {all}");
+        assert!(all.contains("different"), "不同消息照常显示不折叠: {all}");
+        // 关闭折叠：4 行全显
+        st.ui.dedupe = false;
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join("
+");
+        assert_eq!(all.matches("retry attempt").count(), 4, "S 关闭后逐行显示");
+    }
+
+    #[test]
     fn 渲染_窄窗不溢出不碎片() {
         // [v0.8.5] 40x12 / 50x14（用户截图场景）/ 30x10：
         // 旧固定布局在此溢出——侧栏碎片/详情顶出屏幕/状态栏多行
@@ -664,6 +796,7 @@ mod tests {
         for i in 0..30 {
             let mut l = crate::log::LogLine { raw: format!("L{i:02}"), ..Default::default() };
             l.source = "test-src".into();
+            l.body = format!("B{i:02}"); // 模拟 parse_line 填消息体（各行不同不折叠）
             buf.push(l);
         }
         st.buffers.insert("test-src".into(), buf);
@@ -686,10 +819,10 @@ mod tests {
         // [v0.7.6] scroll_x 平移：长行右侧内容随 ←/→ 可见
         let mut st = test_state();
         let mut buf = crate::log::LogBuffer::new(10);
-        let mut l = crate::log::LogLine { raw: "AAAA".into(), ..Default::default() };
+        let mut l = crate::log::LogLine { raw: "AAAA".into(), body: "AAAA".into(), ..Default::default() };
         l.source = "test-src".into();
         buf.push(l);
-        let mut l2 = crate::log::LogLine { raw: "BBBB-TAIL".into(), ..Default::default() };
+        let mut l2 = crate::log::LogLine { raw: "BBBB-TAIL".into(), body: "BBBB-TAIL".into(), ..Default::default() };
         l2.source = "test-src".into();
         buf.push(l2);
         st.buffers.insert("test-src".into(), buf);

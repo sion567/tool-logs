@@ -74,6 +74,8 @@ pub struct UiState {
     pub show_sidebar: bool,
     pub show_sparkline: bool,
     pub show_hints: bool,
+    /// [v0.10] 相似行折叠 ×N（v0.4 路线遗留；S 键切换）
+    pub dedupe: bool,
 }
 
 impl UiState {
@@ -83,6 +85,7 @@ impl UiState {
             show_sidebar: cfg.show_sidebar,
             show_sparkline: cfg.show_sparkline,
             show_hints: cfg.show_hints,
+            dedupe: true, // [v0.10] 折叠默认开（刷屏场景收益大；S 键关闭）
         }
     }
 }
@@ -208,8 +211,8 @@ impl AppState {
         // remember_last_source（§8）：恢复模式 + 自动连接目标
         let mut autostart = None;
         let mut mode = ModeVariant::default();
-        let (mut st_ui_wrap, mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints) =
-            (None, None, None, None);
+        let (mut st_ui_wrap, mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints, mut st_ui_dedupe) =
+            (None, None, None, None, None);
         if config.general.remember_last_source {
             if let Some(state) = load_state() {
                 if let Some(sid) = state.last_source.clone() {
@@ -223,6 +226,7 @@ impl AppState {
                 if let Some(v) = state.ui_sidebar { st_ui_sidebar = Some(v); }
                 if let Some(v) = state.ui_sparkline { st_ui_sparkline = Some(v); }
                 if let Some(v) = state.ui_hints { st_ui_hints = Some(v); }
+                if let Some(v) = state.ui_dedupe { st_ui_dedupe = Some(v); }
             }
         }
 
@@ -251,6 +255,7 @@ impl AppState {
                 if let Some(v) = st_ui_sidebar { ui.show_sidebar = v; }
                 if let Some(v) = st_ui_sparkline { ui.show_sparkline = v; }
                 if let Some(v) = st_ui_hints { ui.show_hints = v; }
+                if let Some(v) = st_ui_dedupe { ui.dedupe = v; }
                 ui
             },
             config,
@@ -390,6 +395,7 @@ impl AppState {
             ui_sidebar: Some(self.ui.show_sidebar),
             ui_sparkline: Some(self.ui.show_sparkline),
             ui_hints: Some(self.ui.show_hints),
+            ui_dedupe: Some(self.ui.dedupe),
         });
     }
 }

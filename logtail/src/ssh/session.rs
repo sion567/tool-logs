@@ -108,10 +108,41 @@ impl ActiveSession {
                 let _ = tx.send(StreamEvent::Lines(batch)).await;
             }
             let mut pos = file.stream_position().unwrap_or(len);
+            // [v0.10] 轮转指纹：文件开头 64 字节。copytruncate 后 len 可能恰好 == pos
+            //（len<pos 检测漏掉），开头指纹变化才是可靠信号
+            let _ = file.seek(SeekFrom::Start(0));
+            let mut start_fp = vec![0u8; 64];
+            let n = file.read(&mut start_fp).unwrap_or(0);
+            start_fp.truncate(n);
+            let _ = file.seek(SeekFrom::Start(pos));
             loop {
                 tokio::select! {
                     _ = &mut stop_rx => break,
                     _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
+                        // [v0.10] 轮转自愈：len<pos（截断/换新）或**开头指纹变化**（copytruncate
+                        // 后 len 可能恰好 == pos，len<pos 漏检）→ 重开从头读
+                        let mut rotated = match std::fs::metadata(&path) {
+                            Ok(m) => m.len() < pos,
+                            Err(_) => true,
+                        };
+                        if !rotated {
+                            let _ = file.seek(SeekFrom::Start(0));
+                            let mut probe = vec![0u8; 64];
+                            let n = file.read(&mut probe).unwrap_or(0);
+                            probe.truncate(n);
+                            // 只比共同前缀：文件增长（追加）不算轮转，开头内容变化才算
+                            let common = n.min(start_fp.len());
+                            rotated = probe[..common] != start_fp[..common];
+                        }
+                        if rotated {
+                            if let Ok(f2) = std::fs::File::open(&path) {
+                                file = f2;
+                                pos = 0;
+                                start_fp.clear();
+                                let _ = file.read_to_end(&mut start_fp); // 新开头指纹
+                                let _ = file.seek(SeekFrom::Start(pos));
+                            }
+                        }
                         let _ = file.seek(SeekFrom::Start(pos));
                         let mut grow = Vec::new();
                         let _ = file.read_to_end(&mut grow);

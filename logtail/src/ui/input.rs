@@ -94,6 +94,13 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             st.ui.show_sparkline = !st.ui.show_sparkline;
             st.status_msg = format!("时间轴: {}", if st.ui.show_sparkline { "显示" } else { "隐藏" });
         }
+        (KeyCode::Char('S'), _) => {
+            st.ui.dedupe = !st.ui.dedupe;
+            st.status_msg = format!(
+                "相似行折叠: {}",
+                if st.ui.dedupe { "开（连续相同消息合并 ×N）" } else { "关" }
+            );
+        }
         (KeyCode::Char('h'), _) => {
             st.ui.show_hints = !st.ui.show_hints;
             st.status_msg = format!(

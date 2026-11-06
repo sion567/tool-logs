@@ -112,6 +112,8 @@ pub struct StateFile {
     pub ui_sparkline: Option<bool>,
     #[serde(default)]
     pub ui_hints: Option<bool>,
+    #[serde(default)]
+    pub ui_dedupe: Option<bool>,
 }
 
 fn state_path() -> PathBuf {

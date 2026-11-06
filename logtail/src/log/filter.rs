@@ -85,8 +85,18 @@ pub fn active_filter_of(fs: &FilterState) -> &FilterMode {
 pub fn matches_filter(line: &LogLine, fm: &FilterMode) -> bool {
     match fm {
         FilterMode::None => true,
-        FilterMode::Text(t) => line.raw.contains(t),
+        // [v0.10] 文本模式 '|' 分隔多关键词：任一命中即匹配（与正则 | 语义对齐）
+        FilterMode::Text(t) => text_patterns(t).iter().any(|p| line.raw.contains(p)),
         FilterMode::Regex(re, _) => re.is_match(&line.raw),
+    }
+}
+
+/// [v0.10] 文本模式多关键词拆分：'a|b' → ["a","b"]；无 '|' 时单关键词
+pub fn text_patterns(t: &str) -> Vec<&str> {
+    if t.contains('|') {
+        t.split('|').filter(|p| !p.is_empty()).collect()
+    } else {
+        vec![t]
     }
 }
 

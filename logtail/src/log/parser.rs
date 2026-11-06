@@ -43,10 +43,26 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
     // [§19 限制①] 远端自带的颜色码（\x1b[31m…）在 ratatui 里会按字面渲染成乱码；
     // 级别检测/时间抽取也会被转义序列干扰。样式保留留给 anstyle-parse（v0.9），先做剥除。
     line.raw = strip_ansi(&line.raw);
+    line.body = strip_ts_prefix(&line.raw).to_string();
     line.level = detect_level(&line.raw);
     line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
+}
+
+/// [v0.10] 消息体提取：剥掉行首的时间戳 token（RFC3339 / docker --timestamps /
+/// 中文 journal / syslog 四种常见形态），剩余部分作为"消息体"——相似行折叠的
+/// 去重键（时间戳每行不同，按 raw 折叠会失效）
+pub fn strip_ts_prefix(raw: &str) -> &str {
+    lazy_static::lazy_static! {
+        static ref RE: regex::Regex = regex::Regex::new(
+            r"^[ ]?(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|[A-Za-z]{3} +\d{1,2} \d{2}:\d{2}:\d{2}|\d{1,2}月 \d{1,2} \d{2}:\d{2}:\d{2})[ ]?"
+        ).unwrap();
+    }
+    match RE.find(raw) {
+        Some(m) if m.start() == 0 => &raw[m.end()..],
+        _ => raw,
+    }
 }
 
 /// 剥除 ANSI 转义序列：CSI（\x1b[…m 等）、OSC（\x1b]… BEL）、双字符转义
@@ -151,6 +167,16 @@ mod tests {
         assert_eq!(l2.trace_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
         let l3 = parse_line("no trace here".into(), SourceType::File);
         assert!(l3.trace_id.is_none());
+    }
+
+    #[test]
+    fn 消息体提取_剥时间戳前缀() {
+        // [v0.10] 相似行折叠的去重键：四种时间戳形态都能剥掉
+        assert_eq!(strip_ts_prefix("2026-11-05T00:16:25.073Z aio.zdhr create"), "aio.zdhr create");
+        assert_eq!(strip_ts_prefix("2026-01-05 14:02:04 db error"), "db error");
+        assert_eq!(strip_ts_prefix("11月 04 06:56:00 sshd: closed"), "sshd: closed");
+        assert_eq!(strip_ts_prefix("Nov  4 06:56:00 sshd: closed"), "sshd: closed");
+        assert_eq!(strip_ts_prefix("no timestamp here"), "no timestamp here");
     }
 
     #[test]

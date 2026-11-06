@@ -26,6 +26,9 @@ pub struct UiCfg {
     /// 状态栏键位提示（隐藏后腾出空间给消息）
     #[serde(default = "d_true")]
     pub show_hints: bool,
+    /// [v0.10] 相似行折叠 ×N
+    #[serde(default)]
+    pub dedupe: Option<bool>,
 }
 
 impl Default for UiCfg {
@@ -35,6 +38,7 @@ impl Default for UiCfg {
             show_sparkline: true,
             show_sidebar: true,
             show_hints: true,
+            dedupe: None,
         }
     }
 }

@@ -696,3 +696,79 @@ async fn sudo_n_无NOPASSWD时报错不挂起() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// [v0.10 §16.5] TOFU：首连记录指纹 → 同 server 重连成功 → known_hosts 篡改后连接被拒
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tofu_首连记录_重连通过_篡改拒绝() -> anyhow::Result<()> {
+    use logtail::ssh::client::connect_with;
+
+    let port = spawn_sshd().await?;
+    let kh = std::env::temp_dir().join(format!("logtail-kh-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&kh);
+    let auth = AuthCfg::Password { password: "pw".into() };
+
+    // 首连（TOFU 记录）
+    connect_with("127.0.0.1", port, "tester", &auth, &kh).await?;
+    let recorded = std::fs::read_to_string(&kh)?;
+    assert!(recorded.contains(&format!("127.0.0.1:{port}")), "首连记录指纹: {recorded}");
+
+    // 同 sshd 重连（指纹一致）通过
+    connect_with("127.0.0.1", port, "tester", &auth, &kh).await?;
+
+    // 篡改指纹 → 拒绝
+    std::fs::write(&kh, format!("127.0.0.1:{port} FAKE-FINGERPRINT"))?;
+    let msg = match connect_with("127.0.0.1", port, "tester", &auth, &kh).await {
+        Ok(_) => anyhow::bail!("篡改后必须拒绝"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("指纹不匹配"), "{msg}");
+    let _ = std::fs::remove_file(&kh);
+    Ok(())
+}
+
+/// [v0.10] 本地流轮转自愈：truncate 重写后泵送达新内容（不再卡死旧 pos）
+#[tokio::test]
+async fn 本地流_轮转截断后送达新内容() -> anyhow::Result<()> {
+    use logtail::ssh::session::ActiveSession;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let dir = std::env::temp_dir().join(format!("logtail-rot-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("app.log");
+    std::fs::write(&path, "old-a
+old-b
+")?;
+    let (mut sess, _jh) = ActiveSession::spawn_local_file(path.to_string_lossy().into_owned(), 5);
+
+    // 排空首批（old-a/old-b）
+    for _ in 0..50 {
+        match sess.rx.try_recv() {
+            Ok(StreamEvent::Lines(_)) => {}
+            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            _ => break,
+        }
+    }
+
+    // copytruncate：清空重写
+    std::fs::write(&path, "new-1
+new-2
+")?;
+    let mut got = Vec::new();
+    for _ in 0..100 {
+        match sess.rx.try_recv() {
+            Ok(StreamEvent::Lines(ls)) => got.extend(ls),
+            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            _ => break,
+        }
+        if got.contains(&"new-1".to_string()) {
+            break;
+        }
+    }
+    assert!(
+        got.iter().any(|l| l.contains("new-")),
+        "轮转后必须送达新内容: {got:?}"
+    );
+    sess.shutdown();
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
