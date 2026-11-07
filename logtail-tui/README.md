@@ -1,0 +1,74 @@
+# logtail-tui — 远程日志查看工具（终端界面）
+
+基于 SSH 的终端日志查看器：连接远程服务器，把 docker / 文件 / systemd 的日志流拉到本地，实时过滤、着色、下钻——替代 `ssh + docker logs -f + grep`。设计与实现细节见 `../logtail-design.md`。
+
+> 工程结构（v0.10.3 workspace 化）：本 crate 只管 UI（ratatui/crossterm）；
+> 连日志的核心库在 [logtail-core](../logtail-core)（SSH/日志源/解析过滤/配置），GUI 前端见 [logtail-gui](../logtail-gui)。
+
+## 快速开始
+
+```bash
+cargo build --release          # 或在仓库根构建整个 workspace
+# 首次运行会在 ~/.config/logtail/config.toml 生成模板，填服务器/源后重启
+./target/release/logtail
+```
+
+无头冒烟（不进 TUI，直接打印着色日志流）：
+
+```bash
+LOGTAIL_HOST=1.2.3.4 LOGTAIL_USER=root LOGTAIL_PASS=xxx \
+LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
+```
+
+## 界面（TestBackend 渲染的真帧，80×24，v0.8）
+
+```text
+
+```
+
+
+## 快捷键
+
+| 键 | 功能 |
+|----|------|
+| `Tab` | 聚焦/离开侧栏（↑↓ 选源或预设，`Enter` 连接/应用） |
+| `/` | 过滤（Enter 确认，Esc 清空，`r` 切正则） |
+| `1`/`2`/`3`/`4`/`0` | 级别阈值 Error/Warn/Info/Debug/全部（`>=` 语义） |
+| `f` | 模式循环：全量 → 快捷(1h) → 精准(近1h) |
+| `P` | 远程预过滤：把当前过滤推到远端 `\| grep` 省带宽（再按关闭，v0.6） |
+| `,` / `.` | 切换上一个/下一个已连接 tab（不拆流，v0.5） |
+| `↑↓` / `Space` / `G` | 选择行 / 暂停跟随 / 跳最新 |
+| `Enter` | 锁定详情面板（`c` 复制 `t` trace 过滤 `q` 关闭） |
+| `e` | 导出当前源会话日志到 `.log` 文件（v0.7） |
+
+### 显示设置（v0.9，退出自动记住）
+
+| 键 | 功能 |
+|----|------|
+| `w` | 长行自动换行 开/关 |
+| `b` | 侧栏 显示/隐藏 |
+| `v` | 日志量时间轴 显示/隐藏 |
+| `h` | 状态栏键位提示 显示/隐藏 |
+| `C` / `L` / `R` | 清屏（不断连）/ 加载更早（Range 窗口平移）/ 重连 |
+| `q` | 退出 |
+
+## 真机验收（§18 剩余 3 条）
+
+1. **三源联测**：config.toml 配 docker / file / journalctl 三类源各一，`Tab` 聚焦侧栏逐个 `Enter` 连接，确认日志滚动、`Esc`→`R` 断开重连无残留进程
+2. **精准模式命令回显**：`f` 循环到"精准"，在远端 `ps aux | grep -E "docker logs|journalctl"` 应看到**无 `-f`** 且带 `--since/--until`；docker 与 journal 两类源都要验
+3. **缩放/ANSI/超长行**：拖动窗口大小不崩；跑一段带颜色的日志确认色码被剥掉不出现乱码；灌一条 >10KB 的栈回溯确认完整显示不截断内存不涨
+
+## 排障
+
+```bash
+logtail --check-config   # 校验配置（语法/源→服务器引用），✔/✘ 报告
+# 闪退/报错永远有痕：~/.config/logtail/logtail.log
+# 连接成功但没数据？多半是模式停在快捷(1h)——按 f 两次切全量回放
+```
+
+## 测试
+
+```bash
+cargo test --all-features   # 在仓库根跑整个 workspace：TUI 单测（TestBackend 渲染/键位矩阵）
+                            # + e2e（主循环/多源并发/远筛）+ core 单测与 in-process sshd 集成测试
+```

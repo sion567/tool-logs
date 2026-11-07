@@ -4,6 +4,8 @@
 > **基于版本**：v0.4.0
 > **修订说明**：本版 = v0.4.0（三轮评审修复 + Day1~7 全量落地）+ 真机验收（192.168.40.198）+ v0.5 多源 tab + v0.6 远程预过滤 + v0.7 导出/sparkline/L 增强 + v0.7.1~v0.7.5 五轮真机反馈修复（空数据提示/错误落盘/--check-config/键位劫持系列）。各版变更见下方变更记录链；实现细节、逐日任务、完整定义、迭代路线全部保留并持续与代码对齐。
 
+> **[Workspace 结构]** v0.10.3 起 `tool-logs/` 为 Cargo workspace 三 crate：`logtail-core/`（连日志核心库，无任何 UI 依赖）、`logtail-tui/`（终端界面，本文档所述 TUI）、`logtail-gui/`（BareTail 风格图形界面，egui/eframe，Windows 单 exe）。GUI 零侵入复用 core 的本地 tail 泵（`spawn_local_file` 轮转自愈）、`parse_line`、`LogBuffer`、`FilterMode/matches_filter`、`ssh::connect`/`with_sudo`；远程源与 TUI 共用 config.toml。本文档其余部分仍只描述 TUI；GUI 细节见 `logtail-gui/README.md`。
+
 ---
 
 ## 变更记录（v0.4.0）
@@ -49,6 +51,34 @@
 | `ModeVariant` 全文无处存放：`f` 循环、预设、`L` 加载更早都要改它 | `AppState.mode` 补字段 | §9 |
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
+
+## 变更记录（v0.10.3，工程重构：workspace 化三 crate）
+
+用户提议并落地：`logtail` 单 crate 混合核心与 TUI、GUI 以整 crate path 依赖复用（连带编译 ratatui/crossterm/arboard，且 GUI 曾借住 TUI 层 app.rs 的三个函数）——拆为 Cargo workspace，职责边界 = 目录边界：
+
+| crate | 职责 | UI 依赖 |
+|-------|------|---------|
+| `logtail-core` | SSH 连接/泵/TOFU、日志源命令构造、行解析过滤、配置、会话导出（**无任何 UI 依赖**） | 无 |
+| `logtail-tui` | AppState/主循环/渲染/键盘（`[[bin]] name="logtail"` 沿用可执行名；lib 供 e2e 测试） | ratatui/crossterm/arboard |
+| `logtail-gui` | egui 图形界面 | eframe |
+
+**下沉 core 的公共件**（原在 TUI app.rs，GUI 曾越层引用）：`SessionState`（→ ssh/session.rs，tab_label/row_label 随行）、`with_sudo`（→ source/mod.rs）、`export_session`（→ log/buffer.rs）。**随 UI 层走**：`LogLevel::color()`（inherent impl 不能跨 crate，改 TUI render.rs 自由函数 `level_color`）、过滤键盘路由 `routes_to_filter` 与编辑助手 `edit_insert/edit_backspace`（→ TUI ui/input.rs）、`Preset::apply`（依赖 AppState，改 TUI app.rs 的 `apply_preset`，core 的 source/mod.rs 只留 Preset 纯数据）。
+
+**测试重组**：in-process sshd 桩（TestServer/spawn_sshd/open_stream/collect_until_ended）抽到 core `testing` 模块（feature `"test-util"` 门控，core 集成测试声明 `required-features`，裸 `cargo test` 跳过、CI `--all-features` 跑全量）；core 集成测试留连接/泵/本地流/sudo/TOFU 十例，主循环 e2e 三例（docker JSON 链路/多源并发/远筛）随 TUI 到 tests/e2e.rs。工程面：单一 Cargo.lock、统一 [profile]、共享 target 缓存，GUI 构建树甩掉 TUI 依赖。
+
+**测试**：`cargo test --workspace --all-features` 全绿（core 单测 40 + core 集成 10 + TUI 单测 37 + TUI e2e 3 + GUI 单测 15 = 105），clippy 0。已知抖动：e2e/sshd 桩在高并发负载下偶发超时敏感（轮询固定轮次），全 workspace 并行跑时约 1/8 概率，单 crate 重跑即过——遗留观察项。
+
+## 变更记录（v0.10.2，详情面板复制上下文）
+
+真机反馈：详情面板 `c` 只能复制当前行，想带走一段现场做不到。c/C 分化（§14）：`c`=复制当前行原文（保持），`C`=复制选中行 ±N 上下文块（`\n` 拼接，多行一次带走）。正常层的 C=清屏；面板开着时 C 先归面板层（detail_consumes 已消费），无冲突。抽纯函数 `context_block_text`。
+
+**测试**：新增 `上下文块_拼接与淘汰缺失`——90 用例全绿、clippy 0。
+
+## 变更记录（v0.10.1，级别识别补异常形态）
+
+logtail-gui 真机反馈：`2026-11-07T02:34:26.251509351Z java.io.IOException: SFTP connection failed: 192.168.40.241:22` 这类**行内无 error 字样**的异常日志被识别为 Unknown，ERROR+ 过滤把它漏掉。`detect_level`（§5.3）补三个关键词：`exception` / `traceback` / `severe`（大小写不敏感，Error 桶内、先于 warn 判断）——TUI 与 GUI 同源受益。
+
+**测试**：新增 `level_detect_异常形态无error字样`——89 用例全绿、clippy 0。
 
 ## 变更记录（v0.10.0，路线扫尾）
 
@@ -432,44 +462,52 @@ v0.9.0 落地后全文档审计，修 10 处正文漂移（v0.5~v0.9 期间的�
 ### 3.1 模块分层（与目录一一对应）
 
 ```
-logtail/
-├── Cargo.toml
-├── README.md                     # 快速开始 + 快捷键
-├── USAGE.md                      # 使用手册（配置详解/排障工作流/FAQ，面向使用者）
-├── config.toml                    # 用户级配置模板（首运行自动生成到 ~/.config/logtail/）
-└── src/
-    ├── lib.rs                     # 模块根（tests/integration.rs 引用库需要它）
-    ├── main.rs                    # 入口：默认 TUI；--demo 无头打印
-    ├── demo.rs                    # --demo 无头模式实现（含本地文件冒烟）
-    ├── app.rs                     # AppState、主循环、事件分发、连接流、PendingAction
-    ├── error.rs                   # LogtailError
-    ├── ui/
-    │   ├── mod.rs
-    │   ├── layout.rs              # Rect 切分（layout(area, has_detail)）
-    │   ├── render.rs              # 标题/侧栏/工具栏/日志区/详情/状态栏 + 反白高亮
-    │   └── input.rs               # 键盘事件 → 状态变更（filter/normal/detail/sidebar 四层）
-    ├── ssh/
-    │   ├── mod.rs
-    │   ├── client.rs              # connect / AuthCfg
-    │   ├── session.rs             # ActiveSession、SessionState、泵任务
-    │   └── stream.rs              # LogStream、LineBuffer、StreamEvent
-    ├── source/
-    │   ├── mod.rs                 # LogSource + ModeVariant + Preset + to_command + 安全校验
-    │   ├── docker.rs              # docker 命令构造（match mode 取时间窗）
-    │   ├── file.rs                # tail 参数构造
-    │   ├── journal.rs             # journalctl + 相对时长换算
-    │   └── loki.rs               # [v0.8] Loki curl+jq 命令构造 + URL/LogQL 校验
-    ├── log/
-    │   ├── mod.rs                 # LogLine / LogLevel 定义
-    │   ├── buffer.rs              # LogBuffer（line_no 连续窗口、front 偏移反查）
-    │   ├── parser.rs              # detect_level / parse_docker_json / 时间与 trace_id 提取
-    │   ├── filter.rs              # FilterState + FilterMode + 命中缓存 + 编辑助手
-    │   └── color.rs               # level → ANSI（--demo 用）
-    └── config/
-        ├── mod.rs                 # Config / GeneralCfg / PresetCfg
-        ├── server.rs              # ServerConfig + AuthCfg
-        ├── source.rs              # SourceConfig
-        └── load.rs                # 加载 / 模板 / state.toml 持久化
+tool-logs/                          # Cargo workspace（v0.10.3 起：单一 Cargo.lock / 统一 [profile] / 共享 target 缓存）
+├── Cargo.toml                      # [workspace] members = core / tui / gui
+├── logtail-design.md               # 本文档
+├── logtail-core/                   # 核心库（不含任何 UI 依赖；前端只依赖它的公共 API）
+│   ├── Cargo.toml                  # lib-only；feature "test-util" = in-process sshd 桩
+│   ├── README.md                   # 模块地图 + 测试说明
+│   ├── src/
+│   │   ├── lib.rs                  # 模块根
+│   │   ├── error.rs                # LogtailError
+│   │   ├── ssh/
+│   │   │   ├── client.rs           # connect / connect_with（TOFU）/ AuthCfg
+│   │   │   ├── stream.rs           # LogStream、LineBuffer、StreamEvent
+│   │   │   └── session.rs          # ActiveSession 泵、spawn_local_file、SessionState（core 化下沉）
+│   │   ├── source/
+│   │   │   ├── mod.rs              # LogSource + ModeVariant + Preset + to_command + with_sudo + 安全校验
+│   │   │   ├── docker.rs           # docker 命令构造（match mode 取时间窗）
+│   │   │   ├── file.rs             # tail 参数构造
+│   │   │   ├── journal.rs          # journalctl + 相对时长换算
+│   │   │   └── loki.rs             # [v0.8] Loki curl+jq 命令构造 + URL/LogQL 校验
+│   │   ├── log/
+│   │   │   ├── mod.rs              # LogLine / LogLevel 定义（color() 随 UI 层走，core 只留 label）
+│   │   │   ├── buffer.rs           # LogBuffer（line_no 连续窗口、front 偏移反查）+ export_session（core 化下沉）
+│   │   │   ├── parser.rs           # detect_level / parse_docker_json / 时间与 trace_id 提取
+│   │   │   ├── filter.rs           # FilterState + FilterMode + 命中缓存（键盘路由/编辑助手随 TUI）
+│   │   │   └── color.rs            # level → ANSI（--demo 用，无 UI 依赖）
+│   │   ├── config/
+│   │   │   ├── mod.rs              # Config / GeneralCfg / PresetCfg
+│   │   │   ├── server.rs           # ServerConfig + AuthCfg
+│   │   │   ├── source_cfg.rs       # SourceConfig
+│   │   │   └── load.rs             # 加载 / 模板 / state.toml 持久化
+│   │   └── testing.rs              # [test-util] in-process sshd 桩（core 集成测试与前端 e2e 共用）
+│   └── tests/integration.rs        # 连接/泵/本地流/sudo/TOFU（required-features = test-util）
+├── logtail-tui/                    # 终端界面（ratatui/crossterm/arboard 依赖全部圈在此）
+│   ├── Cargo.toml                  # [[bin]] name = "logtail"（沿用历史可执行名）
+│   ├── README.md / USAGE.md        # 快捷键 / 使用手册
+│   ├── src/
+│   │   ├── main.rs                 # 入口：默认 TUI；--demo 无头打印；--check-config
+│   │   ├── demo.rs                 # --demo 无头模式实现（含本地文件冒烟）
+│   │   ├── app.rs                  # AppState、主循环、事件分发、连接流、PendingAction、apply_preset
+│   │   └── ui/
+│   │       ├── layout.rs           # Rect 切分（layout(area, has_detail)）
+│   │       ├── render.rs           # 标题/侧栏/工具栏/日志区/详情/状态栏 + level_color 色表
+│   │       └── input.rs            # 键盘事件 → 状态变更 + routes_to_filter/edit_*（自 core 移入）
+│   └── tests/e2e.rs                # 主循环 e2e：docker JSON 链路 / 多源并发 / 远程预过滤
+└── logtail-gui/                    # 图形界面（egui/eframe，依赖 logtail-core）
+    └── src/                        # main / ui / tab / pump / remote / prefs
 ```
 
 ### 3.2 数据流
@@ -1922,6 +1960,7 @@ pub async fn main_loop(terminal: &mut Terminal, mut st: AppState) -> anyhow::Res
 | `Enter` | 连接选中源 / 应用选中预设 | 侧栏 | 连接=新建会话；预设=`Preset::apply`（§10） |
 | `Enter` | 锁定详情面板 | 正常 | |
 | `c` | 复制选中行原文 | 详情 | 调系统剪贴板 crate |
+| `C` | 复制选中行 ±N 上下文块（多行拼接） | 详情 | [v0.10.2] 正常层 C=清屏，面板开着时归面板层 |
 | `C` | 清屏 + **强制全屏重绘** [v0.8.2] | 正常 | 终端宽度错位/残留画面时按 `C` 即时恢复；与 `c` 分键 |
 | `t` | 按 `trace_id` 过滤 | 详情 | 需该行解析出 trace_id |
 | `p` | 只看该源 | 详情 | |

@@ -1,0 +1,34 @@
+[package]
+name = "logtail-core"
+version = "0.10.3"
+edition = "2021"
+description = "logtail 核心库：SSH 连接 / 日志源命令构造 / 行解析与过滤 / 配置（不含任何 UI）"
+
+[dependencies]
+# 异步底座（russh 依赖）
+tokio = { version = "1", features = ["full"] }
+# SSH（§2 锁 0.44；russh-keys 0.45 起并入 russh::keys，升级时只改 ssh/stream.rs 边界）
+russh = "0.44"
+russh-keys = "0.44"
+# russh 0.44 的 client/server Handler 是 async_trait，impl 侧需要同一宏
+async-trait = "0.1"
+# 序列化
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# 正则 / 时间
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+lazy_static = "1"
+# 错误
+anyhow = "1"
+thiserror = "1"
+
+[features]
+# 测试设施（in-process sshd 桩，§17）：仅测试需要，常规构建不含
+test-util = []
+
+# 集成测试依赖 test-util（in-process sshd）；裸 cargo test 跳过该 target，CI 用 --all-features 跑全量
+[[test]]
+name = "integration"
+required-features = ["test-util"]

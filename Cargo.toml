@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["logtail-core", "logtail-tui", "logtail-gui"]
+
+# 统一构建档（成员 crate 不得重复定义 [profile.*]）：
+# Windows 下 dev 全量调试符号链接极慢（Defender 扫描放大），开发期不生成调试符号
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = true

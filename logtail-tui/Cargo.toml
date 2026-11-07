@@ -1,0 +1,39 @@
+[package]
+name = "logtail-tui"
+version = "0.10.3"
+edition = "2021"
+description = "logtail 终端界面（ratatui TUI）：状态机 / 渲染 / 键盘交互，核心逻辑在 logtail-core"
+
+[lib]
+name = "logtail_tui"
+path = "src/lib.rs"
+
+# 可执行文件沿用历史名 `logtail`（USAGE/文档引用 ./logtail）
+[[bin]]
+name = "logtail"
+path = "src/main.rs"
+
+[dependencies]
+# 核心库：SSH 连接 / 日志源 / 解析过滤 / 配置
+logtail-core = { version = "0.10.3", path = "../logtail-core" }
+# TUI
+ratatui = "0.26"
+crossterm = "0.27"
+# 剪贴板（Day6 详情 `c`）
+arboard = "3"
+# 异步底座（russh 依赖 + Disconnect 断开语义）
+tokio = { version = "1", features = ["full"] }
+russh = "0.44"
+# 序列化（--check-config 直读 TOML）
+toml = "0.8"
+# 正则 / 时间
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+# 错误 / 自身日志
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# e2e 集成测试需要 core 的 in-process sshd 桩（§17）
+logtail-core = { version = "0.10.3", path = "../logtail-core", features = ["test-util"] }

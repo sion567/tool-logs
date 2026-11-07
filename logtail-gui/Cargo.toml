@@ -1,0 +1,18 @@
+[package]
+name = "logtail-gui"
+version = "0.1.5"
+edition = "2024"
+description = "BareTail 风格的图形界面日志查看器（本地文件 + 远程源），复用 logtail-core 核心库"
+
+[dependencies]
+eframe = "0.37.0"
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
+toml = "0.8"
+anyhow = "1"
+regex = "1"
+# Windows 上配置 wgpu 后端白名单（禁 Vulkan）用
+egui-wgpu = "0.37"
+# 复用 logtail-core 的本地 tail 泵（轮转自愈）/ 行解析 / 过滤 / SSH 连接
+logtail-core = { version = "0.10.3", path = "../logtail-core" }
