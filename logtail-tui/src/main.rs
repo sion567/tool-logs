@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
     init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("logtail v{}", env!("CARGO_PKG_VERSION"));
+        println!("logtail-tui v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if let Some(pos) = args.iter().position(|a| a == "--check-config") {
@@ -70,7 +70,7 @@ fn check_config(path: Option<&String>) -> Result<()> {
     if !bad.is_empty() {
         anyhow::bail!("{} 个源的 server 引用无效，修正后再启动", bad.len());
     }
-    println!("✔ 配置整体有效，可以启动 ./logtail");
+    println!("✔ 配置整体有效，可以启动 ./logtail-tui");
     Ok(())
 }
 

@@ -8,9 +8,9 @@ description = "logtail 终端界面（ratatui TUI）：状态机 / 渲染 / 键�
 name = "logtail_tui"
 path = "src/lib.rs"
 
-# 可执行文件沿用历史名 `logtail`（USAGE/文档引用 ./logtail）
+# 可执行文件与 crate 同名：打包产物统一为 logtail-tui / logtail-gui
 [[bin]]
-name = "logtail"
+name = "logtail-tui"
 path = "src/main.rs"
 
 [dependencies]

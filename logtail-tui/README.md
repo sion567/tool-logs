@@ -10,7 +10,7 @@
 ```bash
 cargo build --release          # 或在仓库根构建整个 workspace
 # 首次运行会在 ~/.config/logtail/config.toml 生成模板，填服务器/源后重启
-./target/release/logtail
+./target/release/logtail-tui
 ```
 
 无头冒烟（不进 TUI，直接打印着色日志流）：
@@ -61,7 +61,7 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 ## 排障
 
 ```bash
-logtail --check-config   # 校验配置（语法/源→服务器引用），✔/✘ 报告
+logtail-tui --check-config   # 校验配置（语法/源→服务器引用），✔/✘ 报告
 # 闪退/报错永远有痕：~/.config/logtail/logtail.log
 # 连接成功但没数据？多半是模式停在快捷(1h)——按 f 两次切全量回放
 ```

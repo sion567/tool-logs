@@ -25,13 +25,13 @@
 ```bash
 git clone <仓库地址> && cd logtail
 cargo build --release
-# 二进制在 target/release/logtail
-./target/release/logtail --version   # logtail v0.7.0
+# 二进制在 target/release/logtail-tui
+./target/release/logtail-tui --version   # logtail-tui v0.10.3
 ```
 
 ### 方式二：直接用已构建的二进制
 
-把 `target/release/logtail(.exe)` 拷到任意有网络的位置即可，单文件、无运行时依赖。
+把 `target/release/logtail-tui(.exe)` 拷到任意有网络的位置即可，单文件、无运行时依赖。
 
 要求：能通过 SSH（密码或私钥）访问目标服务器；目标机上 `docker` / `tail` / `journalctl` 按需可用。
 
@@ -40,9 +40,9 @@ cargo build --release
 ## 3. 首次运行（30 秒上手）
 
 ```bash
-./logtail            # 首次运行自动生成配置模板并退出提示
+./logtail-tui        # 首次运行自动生成配置模板并退出提示
 vim ~/.config/logtail/config.toml   # 填服务器和源（见下节）
-./logtail            # 再启动，Tab 聚焦侧栏 → ↑↓ 选源 → Enter 连接
+./logtail-tui        # 再启动，Tab 聚焦侧栏 → ↑↓ 选源 → Enter 连接
 ```
 
 连接成功后日志开始滚动。`q` 退出（任何界面层都可用 `Ctrl+C`）。
@@ -253,7 +253,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 ## 8. 典型排障工作流
 
 ```
-1. ./logtail                          # 启动，自动连上次的源
+1. ./logtail-tui                      # 启动，自动连上次的源
 2. 报警来了 → 侧栏选目标源 Enter       # 没连过就先连
 3. 持续刷屏看不清 → Space 暂停跟随     # 或先 / 输入关键字再暂停
 4. / 输入 "timeout" 回车              # 即时筛，不用重跑远程命令
@@ -275,7 +275,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 LOGTAIL_HOST=192.168.40.198 LOGTAIL_USER=xxm LOGTAIL_PASS='密码' \
 LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" \
 LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地文件泵，不经 SSH）
-./logtail --demo
+./logtail-tui --demo
 ```
 
 `--version` / `-V` 打印版本。
@@ -285,7 +285,7 @@ LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地�
 ## 10. 常见问题（FAQ）
 
 **Q：连接成功但一直没数据？**
-最常见原因：模式停在**快捷(1h)**——只回放最近 1 小时，安静的服务（如无流量的流媒体/守护进程）期间可能一条日志都没有。状态栏会提示"⚠ 当前只回放最近 1h…"。按 `f` 两次（确认）切**全量**回放全部历史，或按 `L` 前移时间窗。要查配置问题：`logtail --check-config`。
+最常见原因：模式停在**快捷(1h)**——只回放最近 1 小时，安静的服务（如无流量的流媒体/守护进程）期间可能一条日志都没有。状态栏会提示"⚠ 当前只回放最近 1h…"。按 `f` 两次（确认）切**全量**回放全部历史，或按 `L` 前移时间窗。要查配置问题：`logtail-tui --check-config`。
 
 **Q：老是闪退怎么办？**
 三步定位（v0.8.3 起有完整退出轨迹）：
@@ -304,7 +304,7 @@ LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地�
 2. **符号宽度错位**：按 `C`——清屏同时强制全屏重绘。根因（Unicode 歧义宽度符号）v0.8.2 已全部 ASCII 化消除。
 
 **Q：程序闪退/报错，但终端一闪而过没看清？**
-所有启动失败和 panic 现在都会无条件写入 `~/.config/logtail/logtail.log`，闪退后打开这个文件就能看到原因。也可以先跑 `logtail --check-config` 校验配置（TOML 语法、源→服务器引用、字段白名单都会检查并给出 ✔/✘ 报告）。
+所有启动失败和 panic 现在都会无条件写入 `~/.config/logtail/logtail.log`，闪退后打开这个文件就能看到原因。也可以先跑 `logtail-tui --check-config` 校验配置（TOML 语法、源→服务器引用、字段白名单都会检查并给出 ✔/✘ 报告）。
 
 **Q：连接失败，状态栏红字"SSH 连接失败"？**
 检查 host/port、网络可达性；服务器 `sshd` 是否限制来源 IP。20 秒无响应按超时处理。

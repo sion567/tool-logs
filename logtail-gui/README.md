@@ -52,7 +52,7 @@ maximized = false
 - **闪退/黑屏**：默认只用 DX12/GL 渲染后端（Vulkan 在部分 Windows 驱动上会崩）。仍出问题时可试
   `set WGPU_BACKEND=opengl` 后启动，把结果反馈给维护者。
 - **中文乱码/方框**：程序自动加载 `C:\Windows\Fonts\msyh.ttc`（微软雅黑），状态栏会提示是否成功。
-- **连接失败**：先跑 TUI 的 `logtail --check-config` 校验 config.toml；SSH 认证/TOFU 问题与 TUI 完全一致；
+- **连接失败**：先跑 TUI 的 `logtail-tui --check-config` 校验 config.toml；SSH 认证/TOFU 问题与 TUI 完全一致；
   具体失败原因看状态栏红字与 logtail.log。
 
 ## 构建与测试

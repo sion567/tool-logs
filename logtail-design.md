@@ -59,7 +59,7 @@
 | crate | 职责 | UI 依赖 |
 |-------|------|---------|
 | `logtail-core` | SSH 连接/泵/TOFU、日志源命令构造、行解析过滤、配置、会话导出（**无任何 UI 依赖**） | 无 |
-| `logtail-tui` | AppState/主循环/渲染/键盘（`[[bin]] name="logtail"` 沿用可执行名；lib 供 e2e 测试） | ratatui/crossterm/arboard |
+| `logtail-tui` | AppState/主循环/渲染/键盘（`[[bin]] name="logtail-tui"` 与 crate 同名；lib 供 e2e 测试） | ratatui/crossterm/arboard |
 | `logtail-gui` | egui 图形界面 | eframe |
 
 **下沉 core 的公共件**（原在 TUI app.rs，GUI 曾越层引用）：`SessionState`（→ ssh/session.rs，tab_label/row_label 随行）、`with_sudo`（→ source/mod.rs）、`export_session`（→ log/buffer.rs）。**随 UI 层走**：`LogLevel::color()`（inherent impl 不能跨 crate，改 TUI render.rs 自由函数 `level_color`）、过滤键盘路由 `routes_to_filter` 与编辑助手 `edit_insert/edit_backspace`（→ TUI ui/input.rs）、`Preset::apply`（依赖 AppState，改 TUI app.rs 的 `apply_preset`，core 的 source/mod.rs 只留 Preset 纯数据）。
@@ -495,7 +495,7 @@ tool-logs/                          # Cargo workspace（v0.10.3 起：单一 Car
 │   │   └── testing.rs              # [test-util] in-process sshd 桩（core 集成测试与前端 e2e 共用）
 │   └── tests/integration.rs        # 连接/泵/本地流/sudo/TOFU（required-features = test-util）
 ├── logtail-tui/                    # 终端界面（ratatui/crossterm/arboard 依赖全部圈在此）
-│   ├── Cargo.toml                  # [[bin]] name = "logtail"（沿用历史可执行名）
+│   ├── Cargo.toml                  # [[bin]] name = "logtail-tui"（与 crate 同名）
 │   ├── README.md / USAGE.md        # 快捷键 / 使用手册
 │   ├── src/
 │   │   ├── main.rs                 # 入口：默认 TUI；--demo 无头打印；--check-config
