@@ -52,6 +52,12 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.10.4，可执行名统一）
+
+打包产物统一为 `logtail-tui` / `logtail-gui`：TUI `[[bin]]` 弃用历史名 `logtail`，与 crate 同名——`--version` 输出随之改 `logtail-tui vX.Y.Z`，`--check-config` 提示文案同步。文档全量同步（USAGE、TUI/GUI README、v0.10.3 变更记录的 crate 表、目录树），顺带修正 USAGE 滞留的 v0.7.0 版本注释。导出文件前缀 `logtail-<源>-<时间戳>.log` 与排障日志 `logtail.log` 属运行期产物，保持不变。工程面：移除重构遗留的 `logtail-core/Cargo.lock`（workspace 下仅根 Cargo.lock 入库）。
+
+**测试**：105 用例全绿、clippy 0；`--version` 实跑 `logtail-tui v0.10.4`。
+
 ## 变更记录（v0.10.3，工程重构：workspace 化三 crate）
 
 用户提议并落地：`logtail` 单 crate 混合核心与 TUI、GUI 以整 crate path 依赖复用（连带编译 ratatui/crossterm/arboard，且 GUI 曾借住 TUI 层 app.rs 的三个函数）——拆为 Cargo workspace，职责边界 = 目录边界：

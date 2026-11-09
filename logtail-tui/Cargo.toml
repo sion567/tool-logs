@@ -1,6 +1,6 @@
 [package]
 name = "logtail-tui"
-version = "0.10.3"
+version = "0.10.4"
 edition = "2021"
 description = "logtail 终端界面（ratatui TUI）：状态机 / 渲染 / 键盘交互，核心逻辑在 logtail-core"
 

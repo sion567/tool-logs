@@ -1,7 +1,7 @@
 # logtail 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
-> 当前版本：v0.10.3（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
+> 当前版本：v0.10.4（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
 
 ---
 
@@ -26,7 +26,7 @@
 git clone <仓库地址> && cd logtail
 cargo build --release
 # 二进制在 target/release/logtail-tui
-./target/release/logtail-tui --version   # logtail-tui v0.10.3
+./target/release/logtail-tui --version   # logtail-tui v0.10.4
 ```
 
 ### 方式二：直接用已构建的二进制
