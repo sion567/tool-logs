@@ -152,7 +152,7 @@ pub struct AppState {
     /// [v0.8.2] 终端错位自愈：C 键触发 terminal.clear() 全量重绘
     /// （ratatui diff 模型在终端宽度错位后无法自愈，clear 是唯一手段）
     pub force_redraw: bool,
-    /// [v0.9] UI 显示设置（热键 w/b/v/h，退出持久化）
+    /// [v0.9] UI 显示设置（热键 b/v/h，退出持久化）
     pub ui: UiState,
     /// [v0.6 §16.6] 远程预过滤 pattern：Some 时命令尾接 | grep -E --line-buffered
     pub remote_prefilter: Option<String>,
@@ -726,19 +726,20 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
         };
         match ev {
             Ok(StreamEvent::Lines(lines)) => {
-                let src_type = st.source_type_of(&sid.to_string());
+                let sid_owned = sid.to_string(); // 批粒度分配一次（逐行 entry/to_string 是原先的热点）
+                let src_type = st.source_type_of(&sid_owned);
                 let n = lines.len();
                 let max_lines = st.config.general.max_buffer_lines;
+                // entry 兜底创建（get_mut 判空会把整批静默丢掉 [v0.4 二轮]）
+                let buf = st
+                    .buffers
+                    .entry(sid_owned.clone())
+                    .or_insert_with(|| LogBuffer::new(max_lines));
                 let mut pushed = 0usize;
                 for raw in lines {
                     // [v0.10.5] 拆壳后的多行记录拆成独立日志行（子行继承记录时间戳）
                     for mut line in parse_line_multi(raw, src_type) {
-                        line.source = sid.to_string(); // 逻辑源名（§5.1 详情面板显示用）
-                                                       // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
-                        let buf = st
-                            .buffers
-                            .entry(sid.to_string())
-                            .or_insert_with(|| LogBuffer::new(max_lines));
+                        line.source = sid_owned.clone(); // 逻辑源名（§5.1 详情面板显示用）
                         buf.push(line);
                         pushed += 1;
                     }

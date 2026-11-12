@@ -177,8 +177,12 @@ impl ActiveSession {
                             if let Ok(f2) = std::fs::File::open(&path) {
                                 file = f2;
                                 pos = 0;
+                                // 新开头指纹只取前 64 字节——此前 read_to_end 把整个新文件
+                                // 读进内存只为取指纹（GB 级日志是内存尖峰）
                                 start_fp.clear();
-                                let _ = file.read_to_end(&mut start_fp); // 新开头指纹
+                                let mut fp = vec![0u8; 64];
+                                let n = file.read(&mut fp).unwrap_or(0);
+                                start_fp.extend_from_slice(&fp[..n]);
                                 let _ = file.seek(SeekFrom::Start(pos));
                             }
                         }

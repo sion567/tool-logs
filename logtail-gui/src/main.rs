@@ -1,6 +1,6 @@
 //! logtail-gui — BareTail 风格的图形界面日志查看器。
 //!
-//! 复用 logtail 库：本地 tail 泵（轮转自愈）/ SSH 连接 / 行解析 / 过滤 / 缓冲。
+//! 复用 logtail-core：本地 tail 泵（轮转自愈）/ SSH 连接 / 行解析 / 过滤 / 缓冲。
 //! 入口职责：字体注入（中文显示）、窗口参数、CLI 文件参数转交 App。
 
 mod prefs;

@@ -107,15 +107,14 @@ fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
         spans.push(Span::raw("   未连接（Tab 聚焦侧栏选源回车）"));
     }
     for tab in &st.tabs {
-        let marker = match st.session_states.get(tab).copied() {
-            Some(SessionState::Connecting) => "c",
-            Some(SessionState::Streaming) => "*",
-            Some(SessionState::Ended) => "x",
-            Some(SessionState::Failed) => "!",
-            None => " ",
+        // [v0.8.7 落地补全] 状态词文字化（当时只改了文档，tab 条代码一直还是 v0.8.2 的
+        // 单字符 c/x/!）：流中保持 *[源名]；非流中 [源名·已结束] 等（SessionState::tab_label）
+        let label = match st.session_states.get(tab).copied() {
+            Some(SessionState::Streaming) => format!("*[{tab}] "),
+            Some(s) => format!("[{tab}{}] ", s.tab_label()),
+            None => format!("[{tab}] "),
         };
         let active = st.active_source.as_deref() == Some(tab.as_str());
-        let label = format!(" {marker}[{tab}] ");
         spans.push(Span::styled(
             label,
             if active {
@@ -384,7 +383,6 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
             if patterns.is_empty() || patterns.iter().all(|p| p.is_empty()) {
                 return vec![(text, false)];
             }
-            let chars: Vec<(usize, char)> = text.char_indices().collect();
             let len = text.len();
             let mut hit = vec![false; len];
             for p in &patterns {
@@ -397,7 +395,6 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
                     start = b + p.len().max(1);
                 }
             }
-            let _ = &chars;
             let mut out = Vec::new();
             let mut i = 0;
             while i < len {

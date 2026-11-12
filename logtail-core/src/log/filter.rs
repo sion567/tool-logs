@@ -101,9 +101,22 @@ pub fn text_patterns(t: &str) -> Vec<&str> {
 
 /// 视图层：buffer 变更或过滤变更时重建（last_rebuild 控制）。只存 line_no，不存下标。
 pub fn rebuild_view(buffer: &crate::log::LogBuffer, fm: &FilterMode, lf: LevelFilter) -> Vec<u64> {
+    // [perf] Text 模式的关键词拆分提到循环外——rebuild 每批全量重扫，
+    // 万行 buffer 逐行调 matches_filter 会逐行分配一个 Vec
+    let patterns = match fm {
+        FilterMode::Text(t) => text_patterns(t),
+        _ => Vec::new(),
+    };
     buffer
         .iter()
-        .filter(|l| lf.matches(l) && matches_filter(l, fm))
+        .filter(|l| {
+            lf.matches(l)
+                && match fm {
+                    FilterMode::None => true,
+                    FilterMode::Text(_) => patterns.iter().any(|p| l.raw.contains(p)),
+                    FilterMode::Regex(re, _) => re.is_match(&l.raw),
+                }
+        })
         .map(|l| l.line_no)
         .collect()
 }

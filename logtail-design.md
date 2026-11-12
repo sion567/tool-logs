@@ -4,7 +4,7 @@
 > **基于版本**：v0.4.0
 > **修订说明**：本版 = v0.4.0（三轮评审修复 + Day1~7 全量落地）+ 真机验收（192.168.40.198）+ v0.5 多源 tab + v0.6 远程预过滤 + v0.7 导出/sparkline/L 增强 + v0.7.1~v0.7.5 五轮真机反馈修复（空数据提示/错误落盘/--check-config/键位劫持系列）。各版变更见下方变更记录链；实现细节、逐日任务、完整定义、迭代路线全部保留并持续与代码对齐。
 
-> **[Workspace 结构]** v0.10.3 起 `tool-logs/` 为 Cargo workspace 三 crate：`logtail-core/`（连日志核心库，无任何 UI 依赖）、`logtail-tui/`（终端界面，本文档所述 TUI）、`logtail-gui/`（BareTail 风格图形界面，egui/eframe，Windows 单 exe）。GUI 零侵入复用 core 的本地 tail 泵（`spawn_local_file` 轮转自愈）、`parse_line`、`LogBuffer`、`FilterMode/matches_filter`、`ssh::connect`/`with_sudo`；远程源与 TUI 共用 config.toml。本文档其余部分仍只描述 TUI；GUI 细节见 `logtail-gui/README.md`。
+> **[Workspace 结构]** v0.10.3 起 `tool-logs/` 为 Cargo workspace 三 crate：`logtail-core/`（连日志核心库，无任何 UI 依赖）、`logtail-tui/`（终端界面，本文档所述 TUI）、`logtail-gui/`（BareTail 风格图形界面，egui/eframe，Windows 单 exe）。GUI 零侵入复用 core 的本地 tail 泵（`spawn_local_file` 轮转自愈）、`parse_line_multi`（ingest 路径，多行记录拆分）、`LogBuffer`、`FilterMode/matches_filter`、`ssh::connect`/`with_sudo`；远程源与 TUI 共用 config.toml。本文档其余部分仍只描述 TUI；GUI 细节见 `logtail-gui/README.md`。
 
 ---
 

@@ -7,9 +7,8 @@ description = "logtail 核心库：SSH 连接 / 日志源命令构造 / 行解�
 [dependencies]
 # 异步底座（russh 依赖）
 tokio = { version = "1", features = ["full"] }
-# SSH（§2 锁 0.44；russh-keys 0.45 起并入 russh::keys，升级时只改 ssh/stream.rs 边界）
+# SSH（§2 锁 0.44；keys 能力经 russh::keys 重导出，无需单独依赖 russh-keys）
 russh = "0.44"
-russh-keys = "0.44"
 # russh 0.44 的 client/server Handler 是 async_trait，impl 侧需要同一宏
 async-trait = "0.1"
 # 序列化

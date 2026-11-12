@@ -2369,7 +2369,6 @@ dependencies = [
  "lazy_static",
  "regex",
  "russh",
- "russh-keys",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

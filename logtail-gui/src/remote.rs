@@ -1,4 +1,4 @@
-//! 远程源连接：复用 logtail 的 ssh::connect / LogSource::to_command / with_sudo。
+//! 远程源连接：复用 logtail-core 的 ssh::connect / LogSource::to_command / with_sudo。
 //!
 //! 与 TUI `app.rs::do_connect` 同一条路径（TOFU 主机密钥校验在 ssh::connect 内自动生效）：
 //! connect → 拼命令 → sudo 前缀 → exec → spawn 泵。区别只在不含 remote_prefilter（GUI v1 不做远筛）。

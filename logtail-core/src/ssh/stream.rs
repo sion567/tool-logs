@@ -37,12 +37,13 @@ impl LineBuffer {
         let mut start = 0;
         for (i, ch) in text.char_indices() {
             if ch == '\n' {
-                let mut line = self.partial.clone() + &text[start..i];
+                // [perf] mem::take 复用 partial 的缓冲——clone+clear 是每行两次分配
+                let mut line = std::mem::take(&mut self.partial);
+                line.push_str(&text[start..i]);
                 if line.ends_with('\r') {
                     line.pop();
                 }
                 out.push(line);
-                self.partial.clear();
                 start = i + 1;
             }
         }
