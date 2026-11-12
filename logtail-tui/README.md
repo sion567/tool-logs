@@ -45,7 +45,6 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" cargo run -- --demo
 
 | 键 | 功能 |
 |----|------|
-| `w` | 长行自动换行 开/关 |
 | `b` | 侧栏 显示/隐藏 |
 | `v` | 日志量时间轴 显示/隐藏 |
 | `h` | 状态栏键位提示 显示/隐藏 |

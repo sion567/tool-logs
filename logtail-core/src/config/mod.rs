@@ -16,9 +16,6 @@ pub use source_cfg::SourceConfig;
 /// 运行时热键切换后经 state.toml 持久化（下次启动沿用）
 #[derive(Debug, Clone, Deserialize)]
 pub struct UiCfg {
-    /// 长行自动换行（默认 false=截断+←→横滚）
-    #[serde(default)]
-    pub wrap_long_lines: bool,
     #[serde(default = "d_true")]
     pub show_sparkline: bool,
     #[serde(default = "d_true")]
@@ -34,7 +31,6 @@ pub struct UiCfg {
 impl Default for UiCfg {
     fn default() -> Self {
         Self {
-            wrap_long_lines: false,
             show_sparkline: true,
             show_sidebar: true,
             show_hints: true,

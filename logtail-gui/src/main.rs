@@ -44,9 +44,8 @@ fn main() -> eframe::Result {
 /// DX12 是 Windows 原生路径（优先），GL 兜底。仍可用 WGPU_BACKEND 环境变量覆盖。
 #[cfg(target_os = "windows")]
 fn configure_windows_backends(options: &mut eframe::NativeOptions) {
-    use egui_wgpu::{wgpu, WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew};
-    let backends = wgpu::Backends::from_env()
-        .unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
+    use egui_wgpu::{WgpuConfiguration, WgpuSetup, WgpuSetupCreateNew, wgpu};
+    let backends = wgpu::Backends::from_env().unwrap_or(wgpu::Backends::DX12 | wgpu::Backends::GL);
     options.wgpu_options = WgpuConfiguration {
         wgpu_setup: WgpuSetup::CreateNew(WgpuSetupCreateNew {
             instance_descriptor: wgpu::InstanceDescriptor {
@@ -70,7 +69,7 @@ fn configure_windows_backends(_options: &mut eframe::NativeOptions) {}
 /// （等宽家族 ASCII 仍用内置等宽，中文回退到系统字体）。
 fn install_cjk_fonts(ctx: &Context) -> bool {
     const CANDIDATES: &[&str] = &[
-        "C:/Windows/Fonts/msyh.ttc",   // 微软雅黑
+        "C:/Windows/Fonts/msyh.ttc", // 微软雅黑
         "C:/Windows/Fonts/msyh.ttf",
         "C:/Windows/Fonts/msyhbd.ttc",
         "C:/Windows/Fonts/simhei.ttf", // 黑体
@@ -78,11 +77,14 @@ fn install_cjk_fonts(ctx: &Context) -> bool {
         "C:/Windows/Fonts/Deng.ttf",   // 等线
     ];
     for path in CANDIDATES {
-        let Ok(bytes) = std::fs::read(path) else { continue };
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
         let mut fonts = FontDefinitions::default();
-        fonts
-            .font_data
-            .insert("cjk".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
+        fonts.font_data.insert(
+            "cjk".into(),
+            std::sync::Arc::new(FontData::from_owned(bytes)),
+        );
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             fonts.families.entry(family).or_default().push("cjk".into());
         }

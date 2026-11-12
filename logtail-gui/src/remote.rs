@@ -3,13 +3,13 @@
 //! 与 TUI `app.rs::do_connect` 同一条路径（TOFU 主机密钥校验在 ssh::connect 内自动生效）：
 //! connect → 拼命令 → sudo 前缀 → exec → spawn 泵。区别只在不含 remote_prefilter（GUI v1 不做远筛）。
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 
 use logtail_core::config::AuthCfg;
 use logtail_core::source::{LogSource, ModeVariant};
 use logtail_core::ssh::session::ActiveSession;
-use logtail_core::ssh::{connect, LogStream};
+use logtail_core::ssh::{LogStream, connect};
 
 /// connect_session + 超时包装。
 ///
@@ -84,7 +84,9 @@ mod tests {
             host: host.into(),
             port,
             user: "u".into(),
-            auth: AuthCfg::Password { password: "p".into() },
+            auth: AuthCfg::Password {
+                password: "p".into(),
+            },
             sudo: false,
             sudo_password: None,
         }
@@ -103,7 +105,10 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let source = LogSource::File { path: "/tmp/x.log".into(), tail: 10 };
+        let source = LogSource::File {
+            path: "/tmp/x.log".into(),
+            tail: 10,
+        };
         let t0 = std::time::Instant::now();
         let out = rt.block_on(connect_session_timed(
             &test_server(&addr.ip().to_string(), addr.port()),

@@ -27,7 +27,10 @@ pub struct TestServer {
 
 impl TestServer {
     pub fn new(sudo_pw: Option<String>) -> Self {
-        Self { sudo_pw, await_pw: None }
+        Self {
+            sudo_pw,
+            await_pw: None,
+        }
     }
 }
 
@@ -57,10 +60,12 @@ impl Handler for TestServer {
         if let (Some(expected), Some(_)) = (&self.sudo_pw, self.await_pw) {
             let got = String::from_utf8_lossy(data).trim_end().to_string();
             let mut payload = "sudo: 密码错误
-".to_string();
+"
+            .to_string();
             if got == *expected {
                 payload = "sudo-ok
-".to_string();
+"
+                .to_string();
             }
             session.data(channel, CryptoVec::from_slice(payload.as_bytes()));
             session.eof(channel);
@@ -83,8 +88,13 @@ impl Handler for TestServer {
                 self.await_pw = Some(channel);
             } else {
                 // 未启用 sudo 模拟：模拟 NOPASSWD 缺失——直接回错误
-                session.data(channel, CryptoVec::from_slice(b"sudo: a password is required
-"));
+                session.data(
+                    channel,
+                    CryptoVec::from_slice(
+                        b"sudo: a password is required
+",
+                    ),
+                );
                 session.eof(channel);
                 session.close(channel);
             }
@@ -92,8 +102,13 @@ impl Handler for TestServer {
         }
         // [v0.8.1] sudo -n：模拟"未配 NOPASSWD"——报错进日志流（本桩语义固定）
         if cmd.contains("sudo -n") {
-            session.data(channel, CryptoVec::from_slice(b"sudo: a password is required
-"));
+            session.data(
+                channel,
+                CryptoVec::from_slice(
+                    b"sudo: a password is required
+",
+                ),
+            );
             session.eof(channel);
             session.close(channel);
             return Ok(());
@@ -179,7 +194,9 @@ pub async fn spawn_sshd_sudo(sudo_pw: Option<String>) -> anyhow::Result<u16> {
 
 /// 连上并 exec 给定命令，返回 LogStream（带 15s 握手超时兜底）
 pub async fn open_stream(port: u16, cmd: &str) -> anyhow::Result<LogStream> {
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
     let connect_fut = connect("127.0.0.1", port, "tester", &auth);
     let sess = match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
         Ok(r) => r?,

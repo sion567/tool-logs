@@ -28,7 +28,10 @@ impl LogBuffer {
 
     /// 窗口内最小 line_no；空 buffer 取 next_no（此时任何查询都应落空）
     fn front_no(&self) -> u64 {
-        self.lines.front().map(|l| l.line_no).unwrap_or(self.next_no)
+        self.lines
+            .front()
+            .map(|l| l.line_no)
+            .unwrap_or(self.next_no)
     }
 
     /// 返回赋给该行的 line_no（调用方可用于选中/命中缓存）
@@ -121,9 +124,18 @@ mod tests {
     #[test]
     fn buffer_淘汰后_by_line_no_仍正确() {
         let mut b = LogBuffer::new(2);
-        let no_a = b.push(LogLine { raw: "a".into(), ..Default::default() }); // no=0
-        let no_b = b.push(LogLine { raw: "b".into(), ..Default::default() }); // no=1
-        let no_c = b.push(LogLine { raw: "c".into(), ..Default::default() }); // no=2，淘汰 a
+        let no_a = b.push(LogLine {
+            raw: "a".into(),
+            ..Default::default()
+        }); // no=0
+        let no_b = b.push(LogLine {
+            raw: "b".into(),
+            ..Default::default()
+        }); // no=1
+        let no_c = b.push(LogLine {
+            raw: "c".into(),
+            ..Default::default()
+        }); // no=2，淘汰 a
         assert!(b.by_line_no(no_a).is_none(), "已淘汰 → None");
         assert_eq!(b.by_line_no(no_b).unwrap().raw, "b", "淘汰后其余 no 不漂移");
         assert_eq!(b.by_line_no(no_c).unwrap().raw, "c");
@@ -133,8 +145,14 @@ mod tests {
     #[test]
     fn new_0_按容量1收敛() {
         let mut b = LogBuffer::new(0);
-        let no0 = b.push(LogLine { raw: "a".into(), ..Default::default() });
-        let no1 = b.push(LogLine { raw: "b".into(), ..Default::default() });
+        let no0 = b.push(LogLine {
+            raw: "a".into(),
+            ..Default::default()
+        });
+        let no1 = b.push(LogLine {
+            raw: "b".into(),
+            ..Default::default()
+        });
         assert_eq!(b.len(), 1, "容量 1：只留最新");
         assert!(b.by_line_no(no0).is_none());
         assert!(b.by_line_no(no1).is_some());
@@ -144,7 +162,10 @@ mod tests {
     fn context_窗口跨越淘汰边界() {
         let mut b = LogBuffer::new(4);
         for s in ["l0", "l1", "l2", "l3", "l4", "l5"] {
-            b.push(LogLine { raw: s.into(), ..Default::default() });
+            b.push(LogLine {
+                raw: s.into(),
+                ..Default::default()
+            });
         }
         // 窗口现剩 l2..l5（no=2..5），no=4 上下文 ±2 → l2,l3,l4,l5
         let got: Vec<&str> = b.context(4, 2, 2).iter().map(|l| l.raw.as_str()).collect();

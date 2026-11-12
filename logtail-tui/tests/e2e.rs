@@ -18,7 +18,9 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
     use logtail_core::config::{Config, PresetCfg};
     use logtail_core::log::LogLevel;
     use logtail_core::source::LogSource;
-    use logtail_tui::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail_tui::app::{
+        drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState,
+    };
     use std::collections::BTreeMap;
 
     let port = spawn_sshd().await?;
@@ -30,9 +32,11 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
         host: "127.0.0.1".into(),
         port,
         user: "tester".into(),
-        auth: AuthCfg::Password { password: "pw".into() },
-            sudo: false,
-            sudo_password: None,
+        auth: AuthCfg::Password {
+            password: "pw".into(),
+        },
+        sudo: false,
+        sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -86,7 +90,11 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
     let buf = st.buffers.get("docker-src").expect("buffer 应随连接创建");
     assert_eq!(buf.len(), 2, "两行 JSON 包壳应拆成两条 LogLine");
     let l0 = buf.by_line_no(0).unwrap();
-    assert!(l0.raw.contains("db error: connection refused"), "raw={}", l0.raw);
+    assert!(
+        l0.raw.contains("db error: connection refused"),
+        "raw={}",
+        l0.raw
+    );
     assert_eq!(l0.level, LogLevel::Error);
     assert!(l0.timestamp.is_some(), "包壳 time 必须被提取");
     assert_eq!(l0.source, "docker-src", "逻辑源名随入栈写入");
@@ -105,7 +113,9 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
     use logtail_core::config::Config;
     use logtail_core::log::LogLevel;
     use logtail_core::source::{LogSource, SourceType};
-    use logtail_tui::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail_tui::app::{
+        drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState,
+    };
 
     let port = spawn_sshd().await?;
 
@@ -116,9 +126,11 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
         host: "127.0.0.1".into(),
         port,
         user: "tester".into(),
-        auth: AuthCfg::Password { password: "pw".into() },
-            sudo: false,
-            sudo_password: None,
+        auth: AuthCfg::Password {
+            password: "pw".into(),
+        },
+        sudo: false,
+        sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -134,7 +146,10 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
     cfg.sources.push(SourceConfig {
         name: "file-src".into(),
         server: "local".into(),
-        source: LogSource::File { path: "/var/log/x.log".into(), tail: 50 },
+        source: LogSource::File {
+            path: "/var/log/x.log".into(),
+            tail: 50,
+        },
     });
 
     let mut st = AppState::new(cfg);
@@ -149,12 +164,19 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
     assert_eq!(st.tabs.len(), 2, "连接成功即入 tab 条");
     assert_eq!(st.active_source.as_deref(), Some("file-src"));
     st.switch_tab(1);
-    assert_eq!(st.active_source.as_deref(), Some("docker-src"), "循环到下一个");
+    assert_eq!(
+        st.active_source.as_deref(),
+        Some("docker-src"),
+        "循环到下一个"
+    );
     assert_eq!(st.connections.len(), 2, "切换不拆流");
     st.switch_tab(-1);
     assert_eq!(st.active_source.as_deref(), Some("file-src"), "反向切换");
     assert_eq!(st.connections.len(), 2);
-    assert_eq!(st.source_type_of(&"docker-src".to_string()), SourceType::Docker);
+    assert_eq!(
+        st.source_type_of(&"docker-src".to_string()),
+        SourceType::Docker
+    );
     assert_eq!(st.source_type_of(&"file-src".to_string()), SourceType::File);
 
     // 两源各自 drain 到终态（对齐主循环语义：终态会话跳过，不重复 drain——
@@ -175,13 +197,23 @@ async fn 多源并发_两会话互不串() -> anyhow::Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(st.session_states.get("docker-src"), Some(&SessionState::Ended));
-    assert_eq!(st.session_states.get("file-src"), Some(&SessionState::Ended));
+    assert_eq!(
+        st.session_states.get("docker-src"),
+        Some(&SessionState::Ended)
+    );
+    assert_eq!(
+        st.session_states.get("file-src"),
+        Some(&SessionState::Ended)
+    );
 
     // buffer 内容互不串
     let d = st.buffers.get("docker-src").unwrap();
     assert_eq!(d.len(), 2);
-    assert_eq!(d.by_line_no(0).unwrap().level, LogLevel::Error, "docker 源走了 JSON 拆壳");
+    assert_eq!(
+        d.by_line_no(0).unwrap().level,
+        LogLevel::Error,
+        "docker 源走了 JSON 拆壳"
+    );
     let f = st.buffers.get("file-src").unwrap();
     assert_eq!(f.len(), 2);
     assert_eq!(f.by_line_no(0).unwrap().raw, "hi", "file 源原文保留");
@@ -197,7 +229,9 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
     use logtail_core::config::Config;
     use logtail_core::log::{FilterMode, FilterState};
     use logtail_core::source::LogSource;
-    use logtail_tui::app::{drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState};
+    use logtail_tui::app::{
+        drain_session, execute_pending, AppState, DrainOutcome, PendingAction, SessionState,
+    };
 
     let port = spawn_sshd().await?;
     let mut cfg = Config::default();
@@ -207,9 +241,11 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
         host: "127.0.0.1".into(),
         port,
         user: "tester".into(),
-        auth: AuthCfg::Password { password: "pw".into() },
-            sudo: false,
-            sudo_password: None,
+        auth: AuthCfg::Password {
+            password: "pw".into(),
+        },
+        sudo: false,
+        sudo_password: None,
     });
     cfg.sources.push(SourceConfig {
         name: "docker-src".into(),
@@ -242,7 +278,10 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
         if st.session_states.get("docker-src") == Some(&SessionState::Ended) {
             break;
         }
-        if matches!(drain_session(&mut st, "docker-src", 200), DrainOutcome::Remove) {
+        if matches!(
+            drain_session(&mut st, "docker-src", 200),
+            DrainOutcome::Remove
+        ) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -256,7 +295,11 @@ async fn e2e_远程预过滤_服务端只回传匹配行() -> anyhow::Result<()>
         "远端 grep 必须只回传匹配行，实际 {} 条",
         buf.len()
     );
-    assert!(buf.by_line_no(0).unwrap().raw.contains("db error: connection refused"));
+    assert!(buf
+        .by_line_no(0)
+        .unwrap()
+        .raw
+        .contains("db error: connection refused"));
     assert_eq!(
         st.remote_prefilter.as_deref(),
         Some("db error"),

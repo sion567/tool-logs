@@ -1,7 +1,7 @@
 //! 级别 → ANSI（Day2 无头打印用；TUI 走 ratatui Style，见 render.rs）
 
-use crate::log::LogLine;
 use crate::log::LogLevel;
+use crate::log::LogLine;
 
 impl LogLevel {
     /// 终端 ANSI 前缀（§四 Day2：31 红 / 33 黄 / 32 绿 / 36 青）

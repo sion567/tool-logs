@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use eframe::egui;
 
-use logtail_core::log::filter::{rebuild_view, FilterMode, LevelFilter, NO_FILTER};
-use logtail_core::log::parser::parse_line;
+use logtail_core::log::filter::{FilterMode, LevelFilter, NO_FILTER, rebuild_view};
+use logtail_core::log::parser::parse_line_multi;
 use logtail_core::log::{LogBuffer, LogLevel};
 use logtail_core::source::SourceType;
 
@@ -46,19 +46,6 @@ impl TabKind {
     }
 }
 
-/// 变高行布局缓存（v0.1.4 换行修复）：每行高度前缀和，供 show_viewport 虚拟化定位。
-/// key = (视图代数, 宽度, 字号, wrap)，任一变化才重算。
-#[derive(Debug, Default, Clone)]
-pub struct RowLayout {
-    pub width: f32,
-    pub font_size: f32,
-    pub wrap: bool,
-    pub view_gen: u64,
-    /// prefix[i] = 第 i 行顶（内容坐标），len = view.len()+1；prefix 恒非空
-    pub prefix: Vec<f32>,
-    pub total: f32,
-}
-
 pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
@@ -94,12 +81,10 @@ pub struct Tab {
     view_built_at: usize,
     view_filter: Option<FilterMode>,
     view_level: LevelFilter,
-    /// 视图重建代数：ensure_view 每次真正重建 +1（行高缓存失效依据）
-    pub view_gen: u64,
-    /// 变高行布局缓存（wrap 行高）
-    pub layout: RowLayout,
-    /// 上一帧日志区内容宽度（变高行估算用）
-    pub last_inner_w: f32,
+
+    /// [v0.1.6] 行详情条：双击行 / 右键「查看完整行」打开，主视图固定单行，
+    /// 长行全文在详情条内折行（对应 TUI 详情面板心智）
+    pub detail_line: Option<u64>,
 
     /// 本地文件大小（状态栏）；远程 tab 显示会话状态
     pub file_size: u64,
@@ -109,7 +94,9 @@ impl Tab {
     pub fn new_local(id: u64, path: &str, max_lines: usize) -> Self {
         Self::new(
             id,
-            TabKind::Local { path: path.to_string() },
+            TabKind::Local {
+                path: path.to_string(),
+            },
             SourceType::File,
             max_lines,
         )
@@ -162,9 +149,7 @@ impl Tab {
             view_built_at: usize::MAX,
             view_filter: None,
             view_level: LevelFilter::All,
-            view_gen: 0,
-            layout: RowLayout::default(),
-            last_inner_w: 0.0,
+            detail_line: None,
             file_size: 0,
         }
     }
@@ -177,13 +162,16 @@ impl Tab {
         }
     }
 
-    /// 泵整批送达：解析入缓冲。返回本批行数。
+    /// 泵整批送达：解析入缓冲。返回本批入缓行数——[v0.1.6] 多行记录（内嵌 \n）
+    /// 拆成独立日志行，可能多于批内原始行数。
     pub fn ingest(&mut self, lines: Vec<String>) -> usize {
-        let n = lines.len();
+        let mut n = 0usize;
         for raw in lines {
-            let mut line = parse_line(raw, self.src_type);
-            line.source = self.title.clone();
-            self.buffer.push(line);
+            for mut line in parse_line_multi(raw, self.src_type) {
+                line.source = self.title.clone();
+                self.buffer.push(line);
+                n += 1;
+            }
         }
         self.total_pushed += n;
         n
@@ -194,6 +182,7 @@ impl Tab {
         self.buffer = LogBuffer::new(self.max_lines);
         self.total_pushed += 1; // 强制 view 失效
         self.clear_selection();
+        self.detail_line = None; // 行已不存在，详情条一并关闭
         self.view.clear();
         self.view_built_at = self.total_pushed;
     }
@@ -260,67 +249,11 @@ impl Tab {
             || self.view_filter != fm
             || self.view_level != self.level
         {
-            self.view = rebuild_view(
-                &self.buffer,
-                fm.as_ref().unwrap_or(&NO_FILTER),
-                self.level,
-            );
+            self.view = rebuild_view(&self.buffer, fm.as_ref().unwrap_or(&NO_FILTER), self.level);
             self.view_built_at = self.total_pushed;
             self.view_filter = fm;
             self.view_level = self.level;
-            self.view_gen += 1; // 行高缓存随之失效
         }
-    }
-
-    /// 变高行布局（v0.1.4 换行修复）：按显示列数估算每行折行数 → 前缀和。
-    /// 只在 视图代数/宽度/字号/wrap 变化时重算；高估行高安全（宁可多留白不裁字）。
-    pub fn ensure_layout(
-        &mut self,
-        width: f32,
-        font_size: f32,
-        wrap: bool,
-        line_h: f32,
-        char_w: f32,
-        min_row_h: f32,
-    ) {
-        let n = self.view.len();
-        let ok = self.layout.wrap == wrap
-            && self.layout.view_gen == self.view_gen
-            && (self.layout.width - width).abs() < 0.5
-            && (self.layout.font_size - font_size).abs() < 0.01
-            && self.layout.prefix.len() == n + 1;
-        if ok {
-            return;
-        }
-        let mut prefix = Vec::with_capacity(n + 1);
-        prefix.push(0.0);
-        let mut acc = 0.0f32;
-        if wrap {
-            // 左右各 3px 内边距 + 滚动条预留
-            let cols = (((width - 6.0) / char_w).floor() as usize).max(1);
-            for &no in &self.view {
-                let lines = self
-                    .buffer
-                    .by_line_no(no)
-                    .map(|l| wrap_line_count(&l.raw, cols))
-                    .unwrap_or(1);
-                acc += (lines as f32 * line_h + 4.0).max(min_row_h);
-                prefix.push(acc);
-            }
-        } else {
-            for _ in 0..n {
-                acc += min_row_h;
-                prefix.push(acc);
-            }
-        }
-        self.layout = RowLayout {
-            width,
-            font_size,
-            wrap,
-            view_gen: self.view_gen,
-            prefix,
-            total: acc,
-        };
     }
 }
 
@@ -333,7 +266,10 @@ fn compile_filter(input: &str, regex_on: bool) -> (Option<FilterMode>, Option<St
         return (Some(FilterMode::Text(input.to_string())), None);
     }
     match regex::Regex::new(input) {
-        Ok(re) => (Some(FilterMode::Regex(Arc::new(re), input.to_string())), None),
+        Ok(re) => (
+            Some(FilterMode::Regex(Arc::new(re), input.to_string())),
+            None,
+        ),
         Err(e) => (None, Some(e.to_string())),
     }
 }
@@ -358,44 +294,6 @@ pub(crate) fn raw_hits(raw: &str, fm: Option<&FilterMode>) -> bool {
             .any(|p| raw.contains(p)),
         Some(FilterMode::Regex(re, _)) => re.is_match(raw),
     }
-}
-
-/// 估算折行数（mono 网格）：该行占 visual_cols 列 → ceil(列 / 每行列数)，至少 1 行
-pub fn wrap_line_count(raw: &str, cols_per_row: usize) -> usize {
-    let cols = visual_cols(raw);
-    cols.div_ceil(cols_per_row).max(1)
-}
-
-/// 显示宽度（列数）：CJK/全角 = 2，Tab = 4，其余 = 1。
-/// 高估安全：行高只多不少（低估会把折行文本裁掉）。
-pub fn visual_cols(s: &str) -> usize {
-    s.chars()
-        .map(|c| {
-            let u = c as u32;
-            if c == '\t' {
-                4
-            } else if matches!(
-                u,
-                0x1100..=0x115F
-                    | 0x2E80..=0x303E
-                    | 0x3041..=0x33FF
-                    | 0x3400..=0x4DBF
-                    | 0x4E00..=0x9FFF
-                    | 0xA000..=0xA4CF
-                    | 0xAC00..=0xD7A3
-                    | 0xF900..=0xFAFF
-                    | 0xFE10..=0xFE19
-                    | 0xFE30..=0xFE6F
-                    | 0xFF00..=0xFF60
-                    | 0xFFE0..=0xFFE6
-            ) || u >= 0x20000
-            {
-                2
-            } else {
-                1
-            }
-        })
-        .sum()
 }
 
 #[cfg(test)]
@@ -553,7 +451,9 @@ mod tests {
                 host: "1.2.3.4".into(),
                 port: 22,
                 user: "root".into(),
-                auth: logtail_core::config::AuthCfg::Password { password: "x".into() },
+                auth: logtail_core::config::AuthCfg::Password {
+                    password: "x".into(),
+                },
                 sudo: false,
                 sudo_password: None,
             },
@@ -565,50 +465,59 @@ mod tests {
     }
 
     #[test]
-    fn 视觉列宽_折行数估算() {
-        use super::{visual_cols, wrap_line_count};
-        assert_eq!(visual_cols("hello"), 5);
-        assert_eq!(visual_cols("中文日志"), 8, "CJK 每字 2 列");
-        assert_eq!(visual_cols("a\tb"), 1 + 4 + 1, "Tab 按 4 列");
-        // 每行 10 列：12 列的行 → 2 行；空串 → 1 行
-        assert_eq!(wrap_line_count("abcdefghij", 10), 1);
-        assert_eq!(wrap_line_count("abcdefghijkl", 10), 2);
-        assert_eq!(wrap_line_count("中文中文中文中文中文中文", 10), 3, "24 列 / 10 = 3 行");
-        assert_eq!(wrap_line_count("", 10), 1);
-    }
-
-    #[test]
-    fn 行高布局_前缀和与失效() {
-        let mut t = tab();
-        t.ingest(vec![
-            "short".into(),
-            "a very long log line that should wrap into multiple visual rows when narrow".into(),
-            "中文字符行宽度按双列估算".into(),
+    fn ingest_多行记录拆分_子行继承时间戳() {
+        // [v0.1.6] docker JSON 记录内嵌 \n（一条记录打印多行内容）→ 拆成独立日志行；
+        // 子行继承记录时间戳、独立识别级别；单行批不受影响
+        let mut t = Tab::new_remote(
+            9,
+            &logtail_core::config::SourceConfig {
+                name: "prod-api".into(),
+                server: "prod-01".into(),
+                source: logtail_core::source::LogSource::Docker {
+                    container: "my-app".into(),
+                    tail: 100,
+                    follow: true,
+                    since: None,
+                    until: None,
+                },
+            },
+            &logtail_core::config::ServerConfig {
+                name: "prod-01".into(),
+                host: "1.2.3.4".into(),
+                port: 22,
+                user: "root".into(),
+                auth: logtail_core::config::AuthCfg::Password {
+                    password: "x".into(),
+                },
+                sudo: false,
+                sudo_password: None,
+            },
+            10,
+        );
+        let n = t.ingest(vec![
+            concat!(
+                r#"{"log":"{\"id\":-1}\n"#,
+                r#"ERROR 崩了\n","#,
+                r#""stream":"stdout","time":"2026-01-05T14:02:04.123+08:00"}"#
+            )
+            .into(),
         ]);
-        t.ensure_view();
-        let g0 = t.view_gen;
-        // wrap 关：每行 = min_row_h
-        t.ensure_layout(800.0, 14.0, false, 20.0, 8.0, 21.0);
-        assert_eq!(t.layout.prefix.len(), 4);
-        assert_eq!(t.layout.total, 63.0, "3 行 × 21.0");
-        assert_eq!(t.layout.view_gen, g0);
-        // 参数不变 → 缓存命中（不重算）
-        let old_prefix = t.layout.prefix.clone();
-        t.ensure_layout(800.0, 14.0, false, 20.0, 8.0, 21.0);
-        assert_eq!(t.layout.prefix, old_prefix);
-        // wrap 开：长行行高 > 短行；前缀单调递增
-        t.ensure_layout(300.0, 14.0, true, 20.0, 8.0, 21.0);
-        assert!(t.layout.prefix.windows(2).all(|w| w[1] > w[0]), "前缀严格递增");
-        assert!(t.layout.total > 63.0, "wrap 后总高更高");
-        let long_row_h = t.layout.prefix[2] - t.layout.prefix[1];
-        let short_row_h = t.layout.prefix[1] - t.layout.prefix[0];
-        assert!(long_row_h > short_row_h, "长行折多行 → 行高更大");
-        // 新数据 → view_gen 变 → 缓存失效重算
-        t.ingest(vec!["another".into()]);
-        t.ensure_view();
-        assert_ne!(t.view_gen, g0);
-        let old_total = t.layout.total;
-        t.ensure_layout(300.0, 14.0, true, 20.0, 8.0, 21.0);
-        assert_ne!(t.layout.total, old_total, "视图变化后重算");
+        assert_eq!(n, 2, "一条记录拆 2 行");
+        assert_eq!(t.buffer.len(), 2);
+        assert_eq!(t.buffer.by_line_no(0).unwrap().raw, r#"{"id":-1}"#);
+        let ts = t.buffer.by_line_no(0).unwrap().timestamp.unwrap();
+        assert_eq!(
+            t.buffer.by_line_no(1).unwrap().timestamp,
+            Some(ts),
+            "子行继承时间戳"
+        );
+        assert_eq!(t.buffer.by_line_no(1).unwrap().level, LogLevel::Error);
+        assert_eq!(t.buffer.by_line_no(1).unwrap().source, t.title);
+        assert_eq!(t.ingest(vec!["plain".into()]), 1, "单行批不受影响");
+        assert_eq!(t.buffer.len(), 3);
+        // 清屏连详情条一并关
+        t.detail_line = Some(0);
+        t.clear();
+        assert!(t.detail_line.is_none());
     }
 }

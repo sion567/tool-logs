@@ -2361,7 +2361,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "logtail-core"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2379,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "logtail-gui"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2394,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "logtail-tui"
-version = "0.10.4"
+version = "0.10.5"
 dependencies = [
  "anyhow",
  "arboard",

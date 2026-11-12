@@ -10,13 +10,13 @@
 //! 远程连接是异步路径（block_on + 20s 超时，期间其它命令排队，转发不受影响——转发跑在 runtime 任务里）。
 
 use std::collections::HashMap;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use logtail_core::config::ServerConfig;
 use logtail_core::source::{LogSource, ModeVariant};
-use logtail_core::ssh::session::ActiveSession;
 use logtail_core::ssh::StreamEvent;
+use logtail_core::ssh::session::ActiveSession;
 
 use crate::remote;
 
@@ -122,7 +122,10 @@ fn handle_cmd(
             let id = rc.id;
             diag(&format!(
                 "连接远程 id={id} {}@{}:{} source={}",
-                rc.server.user, rc.server.host, rc.server.port, rc.source_name_for_log()
+                rc.server.user,
+                rc.server.host,
+                rc.server.port,
+                rc.source_name_for_log()
             ));
             // block_on 期间其它命令排队，转发不受影响（跑在 runtime 任务里）；
             // 超时包装在 connect_session_timed 内部（运行时上下文内）求值——
@@ -194,19 +197,28 @@ mod tests {
 
         let pump = spawn();
         pump.cmd_tx
-            .send(PumpCmd::OpenLocal { id: 7, path: path.display().to_string(), tail: 10 })
+            .send(PumpCmd::OpenLocal {
+                id: 7,
+                path: path.display().to_string(),
+                tail: 10,
+            })
             .unwrap();
 
         // 回放批次（泵 300ms 轮询一次，给足 3s）
         let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Lines(_)), "回放批次");
         match got {
-            StreamEvent::Lines(lines) => assert!(lines.contains(&"l0".to_string()), "回放含首行: {lines:?}"),
+            StreamEvent::Lines(lines) => {
+                assert!(lines.contains(&"l0".to_string()), "回放含首行: {lines:?}")
+            }
             _ => unreachable!(),
         }
 
         // 追加一行 → 实时送达
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(f, "l3").unwrap();
         let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Lines(_)), "追加行");
         match got {
@@ -216,7 +228,11 @@ mod tests {
 
         // Stop → 恰好一个 Ended
         pump.cmd_tx.send(PumpCmd::Stop { id: 7 }).unwrap();
-        let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Ended), "Stop 后的 Ended");
+        let got = recv_until(
+            &pump,
+            |ev| matches!(ev, StreamEvent::Ended),
+            "Stop 后的 Ended",
+        );
         assert!(matches!(got, StreamEvent::Ended));
         drop(pump); // cmd_tx drop → 泵线程自退
         std::fs::remove_dir_all(&dir).ok();
@@ -253,24 +269,37 @@ mod tests {
                     host: "127.0.0.1".into(),
                     port,
                     user: "u".into(),
-                    auth: logtail_core::config::AuthCfg::Password { password: "p".into() },
+                    auth: logtail_core::config::AuthCfg::Password {
+                        password: "p".into(),
+                    },
                     sudo: false,
                     sudo_password: None,
                 },
-                source: LogSource::File { path: "/x.log".into(), tail: 10 },
+                source: LogSource::File {
+                    path: "/x.log".into(),
+                    tail: 10,
+                },
                 mode: ModeVariant::Full,
             })))
             .unwrap();
 
         // 期待 [连接失败] 行 + Ended
-        let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Lines(_)), "连接失败行");
+        let got = recv_until(
+            &pump,
+            |ev| matches!(ev, StreamEvent::Lines(_)),
+            "连接失败行",
+        );
         match got {
             StreamEvent::Lines(lines) => {
                 assert!(lines.iter().any(|l| l.contains("[连接失败]")), "{lines:?}")
             }
             _ => unreachable!(),
         }
-        let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Ended), "失败后的 Ended");
+        let got = recv_until(
+            &pump,
+            |ev| matches!(ev, StreamEvent::Ended),
+            "失败后的 Ended",
+        );
         assert!(matches!(got, StreamEvent::Ended));
 
         // 泵线程必须仍存活：后续 OpenLocal 仍能正常回放
@@ -279,11 +308,21 @@ mod tests {
         let path = dir.join("t2.log");
         std::fs::write(&path, "after-fail\n").unwrap();
         pump.cmd_tx
-            .send(PumpCmd::OpenLocal { id: 10, path: path.display().to_string(), tail: 5 })
+            .send(PumpCmd::OpenLocal {
+                id: 10,
+                path: path.display().to_string(),
+                tail: 5,
+            })
             .unwrap();
-        let got = recv_until(&pump, |ev| matches!(ev, StreamEvent::Lines(_)), "失败后的本地回放");
+        let got = recv_until(
+            &pump,
+            |ev| matches!(ev, StreamEvent::Lines(_)),
+            "失败后的本地回放",
+        );
         match got {
-            StreamEvent::Lines(lines) => assert!(lines.contains(&"after-fail".to_string()), "{lines:?}"),
+            StreamEvent::Lines(lines) => {
+                assert!(lines.contains(&"after-fail".to_string()), "{lines:?}")
+            }
             _ => unreachable!(),
         }
         drop(pump);

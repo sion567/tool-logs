@@ -12,14 +12,14 @@ use ratatui::Terminal;
 use russh::Disconnect;
 use tokio::sync::mpsc::error::TryRecvError;
 
+use crate::ui::input::{handle_filter_key, handle_normal_key};
+use crate::ui::render::render;
 use logtail_core::config::{load_state, save_state, Config, SourceConfig, StateFile};
-use logtail_core::log::parser::parse_line;
+use logtail_core::log::parser::parse_line_multi;
 use logtail_core::log::{export_session, LevelFilter, LogBuffer};
 use logtail_core::source::{with_sudo, ModeVariant, Preset, SourceType};
 use logtail_core::ssh::session::ActiveSession;
 use logtail_core::ssh::stream::StreamEvent;
-use crate::ui::input::{handle_filter_key, handle_normal_key};
-use crate::ui::render::render;
 
 /// 源的逻辑 ID = config 里的 source.name（如 "prod-api"）。（§9 [v0.4 P2#6]）
 pub type SourceId = String;
@@ -37,10 +37,10 @@ pub struct Viewport {
 /// 这里 re-export 保持 `logtail_tui::app::SessionState` 路径兼容。
 pub use logtail_core::ssh::session::SessionState;
 
-/// [v0.9] UI 显示设置（运行时值）：热键 w/b/v/h 切换，退出经 state.toml 持久化
+/// [v0.9] UI 显示设置（运行时值）：热键 b/v/h 切换，退出经 state.toml 持久化。
+/// [v0.10.5] wrap_long_lines 撤销——主视图固定单行（截断+←→横滚），长行全文看详情面板
 #[derive(Debug, Clone)]
 pub struct UiState {
-    pub wrap_long_lines: bool,
     pub show_sidebar: bool,
     pub show_sparkline: bool,
     pub show_hints: bool,
@@ -51,7 +51,6 @@ pub struct UiState {
 impl UiState {
     pub(crate) fn from_config(cfg: &logtail_core::config::UiCfg) -> Self {
         Self {
-            wrap_long_lines: cfg.wrap_long_lines,
             show_sidebar: cfg.show_sidebar,
             show_sparkline: cfg.show_sparkline,
             show_hints: cfg.show_hints,
@@ -136,7 +135,7 @@ pub struct AppState {
     pub presets: Vec<Preset>,
 
     // ---- 视图 ----
-    pub selected_line_no: Option<u64>, // 只认 line_no，不认下标
+    pub selected_line_no: Option<u64>,     // 只认 line_no，不认下标
     pub detail_panel: Option<DetailPanel>, // Day6 启用
     pub viewport: Viewport,
     pub following: bool,
@@ -181,8 +180,8 @@ impl AppState {
         // remember_last_source（§8）：恢复模式 + 自动连接目标
         let mut autostart = None;
         let mut mode = ModeVariant::default();
-        let (mut st_ui_wrap, mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints, mut st_ui_dedupe) =
-            (None, None, None, None, None);
+        let (mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints, mut st_ui_dedupe) =
+            (None, None, None, None);
         if config.general.remember_last_source {
             if let Some(state) = load_state() {
                 if let Some(sid) = state.last_source.clone() {
@@ -192,11 +191,18 @@ impl AppState {
                 }
                 mode = restore_mode(&state);
                 // [v0.9] UI 设置热切换持久化恢复（Some 覆盖）
-                if let Some(v) = state.ui_wrap { st_ui_wrap = Some(v); }
-                if let Some(v) = state.ui_sidebar { st_ui_sidebar = Some(v); }
-                if let Some(v) = state.ui_sparkline { st_ui_sparkline = Some(v); }
-                if let Some(v) = state.ui_hints { st_ui_hints = Some(v); }
-                if let Some(v) = state.ui_dedupe { st_ui_dedupe = Some(v); }
+                if let Some(v) = state.ui_sidebar {
+                    st_ui_sidebar = Some(v);
+                }
+                if let Some(v) = state.ui_sparkline {
+                    st_ui_sparkline = Some(v);
+                }
+                if let Some(v) = state.ui_hints {
+                    st_ui_hints = Some(v);
+                }
+                if let Some(v) = state.ui_dedupe {
+                    st_ui_dedupe = Some(v);
+                }
             }
         }
 
@@ -221,11 +227,18 @@ impl AppState {
             sidebar: Sidebar::default(),
             ui: {
                 let mut ui = UiState::from_config(&config.ui);
-                if let Some(v) = st_ui_wrap { ui.wrap_long_lines = v; }
-                if let Some(v) = st_ui_sidebar { ui.show_sidebar = v; }
-                if let Some(v) = st_ui_sparkline { ui.show_sparkline = v; }
-                if let Some(v) = st_ui_hints { ui.show_hints = v; }
-                if let Some(v) = st_ui_dedupe { ui.dedupe = v; }
+                if let Some(v) = st_ui_sidebar {
+                    ui.show_sidebar = v;
+                }
+                if let Some(v) = st_ui_sparkline {
+                    ui.show_sparkline = v;
+                }
+                if let Some(v) = st_ui_hints {
+                    ui.show_hints = v;
+                }
+                if let Some(v) = st_ui_dedupe {
+                    ui.dedupe = v;
+                }
                 ui
             },
             config,
@@ -273,11 +286,17 @@ impl AppState {
         let mut out = Vec::new();
         let mut grouped = Vec::new();
         for srv in &self.config.servers {
-            out.push((SideEntry::Server(srv.name.clone()), format!("▾ {}", srv.name)));
+            out.push((
+                SideEntry::Server(srv.name.clone()),
+                format!("▾ {}", srv.name),
+            ));
             for sc in &self.config.sources {
                 if sc.server == srv.name {
                     grouped.push(sc.name.clone());
-                    out.push((SideEntry::Source(sc.name.clone()), self.source_row(&sc.name)));
+                    out.push((
+                        SideEntry::Source(sc.name.clone()),
+                        self.source_row(&sc.name),
+                    ));
                 }
             }
         }
@@ -294,11 +313,17 @@ impl AppState {
             ));
             for sc in orphans {
                 grouped.push(sc.name.clone());
-                out.push((SideEntry::Source(sc.name.clone()), self.source_row(&sc.name)));
+                out.push((
+                    SideEntry::Source(sc.name.clone()),
+                    self.source_row(&sc.name),
+                ));
             }
         }
         if !self.config.presets.is_empty() {
-            out.push((SideEntry::Server("__presets__".into()), "▾ 预设".to_string()));
+            out.push((
+                SideEntry::Server("__presets__".into()),
+                "▾ 预设".to_string(),
+            ));
             for p in &self.presets {
                 out.push((SideEntry::Preset(p.key.clone()), format!("  ⚡ {}", p.name)));
             }
@@ -361,7 +386,6 @@ impl AppState {
             last_source,
             mode: Some(mode),
             since,
-            ui_wrap: Some(self.ui.wrap_long_lines),
             ui_sidebar: Some(self.ui.show_sidebar),
             ui_sparkline: Some(self.ui.show_sparkline),
             ui_hints: Some(self.ui.show_hints),
@@ -382,7 +406,9 @@ fn parse_level(s: &str) -> Option<LevelFilter> {
 
 fn restore_mode(state: &StateFile) -> ModeVariant {
     match state.mode.as_deref() {
-        Some("quick") => ModeVariant::Quick { since: state.since.clone() },
+        Some("quick") => ModeVariant::Quick {
+            since: state.since.clone(),
+        },
         _ => ModeVariant::Full,
     }
 }
@@ -435,7 +461,10 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), crossterm::terminal::LeaveAlternateScreen)?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -478,7 +507,8 @@ pub async fn main_loop(
                     }
                     // [v0.7.2] Ctrl+R 全局切换正则：Typing 态里 r 已是普通字符，切换键只能用组合键
                     else if matches!(k.code, KeyCode::Char('r') | KeyCode::Char('R'))
-                        && k.modifiers.contains(KeyModifiers::CONTROL) {
+                        && k.modifiers.contains(KeyModifiers::CONTROL)
+                    {
                         st.regex_mode = !st.regex_mode;
                         st.status_msg = format!(
                             "正则模式: {}（Enter 落规则时生效）",
@@ -672,9 +702,7 @@ async fn toggle_prefilter(st: &mut AppState) {
             match logtail_core::source::check_pattern(&pat) {
                 Ok(()) => {
                     st.remote_prefilter = Some(pat.clone());
-                    st.status_msg = format!(
-                        "远程预过滤开启: {pat}（远端只回传匹配行；按 P 关闭）"
-                    );
+                    st.status_msg = format!("远程预过滤开启: {pat}（远端只回传匹配行；按 P 关闭）");
                     if let Some(sid) = st.active_source.clone() {
                         reconnect(st, &sid).await;
                     }
@@ -701,32 +729,35 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
                 let src_type = st.source_type_of(&sid.to_string());
                 let n = lines.len();
                 let max_lines = st.config.general.max_buffer_lines;
+                let mut pushed = 0usize;
                 for raw in lines {
-                    let mut line = parse_line(raw, src_type);
-                    line.source = sid.to_string(); // 逻辑源名（§5.1 详情面板显示用）
-                    // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
-                    let buf = st
-                        .buffers
-                        .entry(sid.to_string())
-                        .or_insert_with(|| LogBuffer::new(max_lines));
-                    buf.push(line);
+                    // [v0.10.5] 拆壳后的多行记录拆成独立日志行（子行继承记录时间戳）
+                    for mut line in parse_line_multi(raw, src_type) {
+                        line.source = sid.to_string(); // 逻辑源名（§5.1 详情面板显示用）
+                                                       // entry 兜底创建：get_mut 判空会把整批静默丢掉 [v0.4 二轮]
+                        let buf = st
+                            .buffers
+                            .entry(sid.to_string())
+                            .or_insert_with(|| LogBuffer::new(max_lines));
+                        buf.push(line);
+                        pushed += 1;
+                    }
                 }
                 // 暂停态锁定视图：新行进来把 scroll_y 顶上去，窗口末端钉住不滑
+                // （按实际入缓行数顶，不按批内原始行数——多行记录拆分后会多出行）
                 if !st.following && st.active_source.as_deref() == Some(sid) {
-                    st.viewport.scroll_y = st.viewport.scroll_y.saturating_add(n as u16);
+                    st.viewport.scroll_y = st.viewport.scroll_y.saturating_add(pushed as u16);
                 }
                 budget = budget.saturating_sub(n);
                 st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
-                // [v0.7.6] docker 权限拒绝检测：远端 stderr 会进日志流，识别后状态栏给修复命令
+                                      // [v0.7.6] docker 权限拒绝检测：远端 stderr 会进日志流，识别后状态栏给修复命令
                 for l in st
                     .buffers
                     .entry(sid.to_string())
                     .or_insert_with(|| LogBuffer::new(max_lines))
                     .tail(n)
                 {
-                    if l.raw.contains("permission denied")
-                        && l.raw.contains("docker.sock")
-                    {
+                    if l.raw.contains("permission denied") && l.raw.contains("docker.sock") {
                         let user = st
                             .sources
                             .get(sid)
@@ -740,14 +771,16 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
                 }
             }
             Ok(StreamEvent::Ended) => {
-                st.session_states.insert(sid.to_string(), SessionState::Ended);
+                st.session_states
+                    .insert(sid.to_string(), SessionState::Ended);
                 st.following = false;
                 st.status_msg = "远程命令已结束（按 R 重连）".into();
                 return DrainOutcome::Remove;
             }
             Err(TryRecvError::Empty) => return DrainOutcome::Continue,
             Err(TryRecvError::Disconnected) => {
-                st.session_states.insert(sid.to_string(), SessionState::Failed);
+                st.session_states
+                    .insert(sid.to_string(), SessionState::Failed);
                 return DrainOutcome::Remove;
             }
         }
@@ -772,12 +805,14 @@ async fn connect_source(st: &mut AppState, sid: &str) {
         .find(|s| s.name == sc.server)
         .cloned()
     else {
-        st.session_states.insert(sid.to_string(), SessionState::Failed);
+        st.session_states
+            .insert(sid.to_string(), SessionState::Failed);
         st.status_msg = format!("源 {sid} 引用的服务器 \"{}\" 不存在", sc.server);
         return;
     };
 
-    st.session_states.insert(sid.to_string(), SessionState::Connecting);
+    st.session_states
+        .insert(sid.to_string(), SessionState::Connecting);
     st.status_msg = format!("连接 {sid}（{}@{}）…", srv.user, srv.host);
     switch_active(st, sid, "");
     let max_lines = st.config.general.max_buffer_lines;
@@ -794,15 +829,18 @@ async fn connect_source(st: &mut AppState, sid: &str) {
             st.buffers
                 .entry(sid.to_string())
                 .or_insert_with(|| LogBuffer::new(max_lines));
-            st.session_states.insert(sid.to_string(), SessionState::Streaming);
+            st.session_states
+                .insert(sid.to_string(), SessionState::Streaming);
             st.status_msg = format!("已连接 {sid}（{}）", mode.label());
         }
         Ok(Err(e)) => {
-            st.session_states.insert(sid.to_string(), SessionState::Failed);
+            st.session_states
+                .insert(sid.to_string(), SessionState::Failed);
             st.status_msg = format!("连接失败: {e}");
         }
         Err(_) => {
-            st.session_states.insert(sid.to_string(), SessionState::Failed);
+            st.session_states
+                .insert(sid.to_string(), SessionState::Failed);
             st.status_msg = "连接超时（20s）".into();
         }
     }
@@ -827,8 +865,7 @@ async fn do_connect(
     mode: &ModeVariant,
     prefilter: Option<&String>,
 ) -> Result<ActiveSession> {
-    let handle =
-        logtail_core::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
+    let handle = logtail_core::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
     let mut cmd = src.to_command(mode)?;
     // [v0.7.7/v0.8.1] sudo 前缀（server 级开关）；密码模式：
     // sudo_password 未填时复用 auth.password（sudo 密码=登录密码的常见场景）
@@ -860,8 +897,14 @@ async fn do_connect(
     if let Some(pw) = &sudo_pw {
         use tokio::io::AsyncWriteExt;
         let mut w = ch.make_writer();
-        w.write_all(format!("{pw}
-").as_bytes()).await?;
+        w.write_all(
+            format!(
+                "{pw}
+"
+            )
+            .as_bytes(),
+        )
+        .await?;
         let _ = ch.eof().await;
     }
     let (sess, _jh) = ActiveSession::spawn(handle, logtail_core::ssh::LogStream::new(ch));
@@ -879,7 +922,8 @@ async fn reconnect(st: &mut AppState, sid: &str) {
         }
     }
     st.buffers.remove(sid);
-    st.session_states.insert(sid.to_string(), SessionState::Connecting);
+    st.session_states
+        .insert(sid.to_string(), SessionState::Connecting);
     connect_source(st, sid).await;
 }
 
@@ -887,7 +931,9 @@ async fn reconnect(st: &mut AppState, sid: &str) {
 async fn cycle_mode(st: &mut AppState) {
     let now = chrono::Utc::now();
     st.mode = match &st.mode {
-        ModeVariant::Full => ModeVariant::Quick { since: Some("1h".into()) },
+        ModeVariant::Full => ModeVariant::Quick {
+            since: Some("1h".into()),
+        },
         ModeVariant::Quick { .. } => ModeVariant::Range(
             (now - chrono::Duration::hours(1)).to_rfc3339(),
             now.to_rfc3339(),
@@ -918,10 +964,14 @@ async fn load_earlier(st: &mut AppState) {
 /// [v0.7] L 键的模式前移规则（纯函数，便于测试）
 fn next_earlier_mode(mode: &ModeVariant) -> Option<ModeVariant> {
     match mode {
-        ModeVariant::Full => Some(ModeVariant::Quick { since: Some("24h".into()) }),
+        ModeVariant::Full => Some(ModeVariant::Quick {
+            since: Some("24h".into()),
+        }),
         ModeVariant::Quick { since } => match since.as_deref() {
             Some(s) => double_duration(s).map(|d| ModeVariant::Quick { since: Some(d) }),
-            None => Some(ModeVariant::Quick { since: Some("24h".into()) }),
+            None => Some(ModeVariant::Quick {
+                since: Some("24h".into()),
+            }),
         },
         // Range(s,u)：窗口向过去平移一个窗口宽度（u 不动，s 前移 Δ）
         ModeVariant::Range(s, u) => extend_range(s, u),
@@ -966,7 +1016,10 @@ mod tests {
                 logtail_core::config::SourceConfig {
                     name: t.clone(),
                     server: "s".into(),
-                    source: logtail_core::source::LogSource::File { path: "/x.log".into(), tail: 10 },
+                    source: logtail_core::source::LogSource::File {
+                        path: "/x.log".into(),
+                        tail: 10,
+                    },
                 },
             );
             st.buffers.insert(t.clone(), LogBuffer::new(10));
@@ -991,7 +1044,7 @@ mod tests {
         assert_eq!(st.active_source.as_deref(), Some("c"));
         // 切换不拆流：connections 不变
         assert_eq!(st.connections.len(), 0); // 此用例无真实会话；不拆流由集成测试覆盖
-        // 切换触发视图重建
+                                             // 切换触发视图重建
         assert!(st.last_rebuild > 0);
     }
 
@@ -1010,7 +1063,10 @@ mod tests {
         let now = chrono::Utc::now();
         for (ago, n) in counts {
             for _ in 0..*n {
-                let mut l = logtail_core::log::LogLine { raw: "x".into(), ..Default::default() };
+                let mut l = logtail_core::log::LogLine {
+                    raw: "x".into(),
+                    ..Default::default()
+                };
                 l.timestamp = Some(now - chrono::Duration::seconds(*ago));
                 b.push(l);
             }
@@ -1027,7 +1083,10 @@ mod tests {
         assert_eq!(v[0], 0, "now-5s 桶为空");
         // 无时间戳的 buffer → 全零
         let mut b2 = LogBuffer::new(10);
-        b2.push(logtail_core::log::LogLine { raw: "no-ts".into(), ..Default::default() });
+        b2.push(logtail_core::log::LogLine {
+            raw: "no-ts".into(),
+            ..Default::default()
+        });
         assert!(sparkline(&b2, 5, 1).iter().all(|&c| c == 0));
     }
 
@@ -1035,10 +1094,18 @@ mod tests {
     fn 导出_会话日志文件格式() {
         let mut b = LogBuffer::new(10);
         let now = chrono::Utc::now();
-        let mut e = logtail_core::log::LogLine { raw: "db refused".into(), level: logtail_core::log::LogLevel::Error, ..Default::default() };
+        let mut e = logtail_core::log::LogLine {
+            raw: "db refused".into(),
+            level: logtail_core::log::LogLevel::Error,
+            ..Default::default()
+        };
         e.timestamp = Some(now);
         b.push(e);
-        let mut info = logtail_core::log::LogLine { raw: "plain line".into(), level: logtail_core::log::LogLevel::Info, ..Default::default() };
+        let mut info = logtail_core::log::LogLine {
+            raw: "plain line".into(),
+            level: logtail_core::log::LogLevel::Info,
+            ..Default::default()
+        };
         info.timestamp = None; // 无时间戳行：导出用 - 占位
         b.push(info);
         let dir = std::env::temp_dir().join(format!("logtail-export-{}", std::process::id()));
@@ -1046,8 +1113,14 @@ mod tests {
         let p = export_session(&b, "src-a", &dir).unwrap();
         let content = std::fs::read_to_string(&p).unwrap();
         assert!(content.contains("源=src-a"), "头部带源名: {content}");
-        assert!(content.contains("ERROR db refused"), "时间戳+级别+原文: {content}");
-        assert!(content.contains("-  INFO plain line"), "无时间戳行用 - 占位: {content}");
+        assert!(
+            content.contains("ERROR db refused"),
+            "时间戳+级别+原文: {content}"
+        );
+        assert!(
+            content.contains("-  INFO plain line"),
+            "无时间戳行用 - 占位: {content}"
+        );
         assert_eq!(content.lines().count(), 3, "头部+2 行");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1078,7 +1151,11 @@ mod tests {
             Some(ModeVariant::Range(s, u)) => {
                 assert_eq!(u, "2026-11-04T03:00:00+00:00", "u 不动");
                 let s_t = DateTime::parse_from_rfc3339(&s).unwrap();
-                assert_eq!(s_t, DateTime::parse_from_rfc3339("2026-11-04T01:00:00+00:00").unwrap(), "s 前移一个窗口宽度");
+                assert_eq!(
+                    s_t,
+                    DateTime::parse_from_rfc3339("2026-11-04T01:00:00+00:00").unwrap(),
+                    "s 前移一个窗口宽度"
+                );
             }
             other => panic!("应为 Range，实际 {other:?}"),
         }
@@ -1092,10 +1169,15 @@ mod tests {
         let before = st.last_rebuild;
         let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         // 与 main_loop 相同的判定（抽出复用）
-        assert!(ctrl_r.code == KeyCode::Char('r') && ctrl_r.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(
+            ctrl_r.code == KeyCode::Char('r') && ctrl_r.modifiers.contains(KeyModifiers::CONTROL)
+        );
         st.regex_mode = !st.regex_mode;
         assert!(st.regex_mode);
-        assert_eq!(st.last_rebuild, before, "切换正则不重建视图（只影响 Enter 落规则）");
+        assert_eq!(
+            st.last_rebuild, before,
+            "切换正则不重建视图（只影响 Enter 落规则）"
+        );
     }
 
     #[test]

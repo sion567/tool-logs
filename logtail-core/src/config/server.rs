@@ -8,8 +8,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum AuthCfg {
-    Password { password: String },
-    Key { path: String, passphrase: Option<String> },
+    Password {
+        password: String,
+    },
+    Key {
+        path: String,
+        passphrase: Option<String>,
+    },
 }
 
 /// 服务器声明（§8）

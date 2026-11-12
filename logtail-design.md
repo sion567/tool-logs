@@ -52,6 +52,14 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.10.5，撤主视图换行 → 详情面板折行）
+
+真机反馈三症状：GUI 勾选换行后 2 行的记录多空一行、3 行的第三行裁一半、一条 JSON 记录只显示 `{{"id":-` 8 个字符且最多 3 行。根因两层：①GUI 行高来自**字符网格估算**（`visual_cols÷每行列数`），实际绘制却交给 egui **按词折行**（UAX#14 断点/像素宽），两套算法不一致——估多留白、估少裁字；②core 的 docker JSON 拆壳只 trim 末尾 `\n`，**一条记录打印多行内容**（pretty JSON/异常栈）时中间真实换行保留在 raw 里，egui `LayoutJob` 在每个 `\n` 处强制断行（`{{"id":-` 后即断），行高估算又把 `\n` 当 1 列——"最多 3 行"实为估算截断。
+
+**决策**：主视图撤换行（需求方提议并采纳）——主视图固定单行（截断 + `←→` 横滚，TUI 原生），长行全文收敛到详情面板（TUI `render_detail` Paragraph 加 `Wrap{trim:false}`，面板高度按可用空间切分与内容无关；GUI 新增**行详情条**：双击行/右键「查看完整行」打开，底部 150px 条 = 元信息头 + egui 真实像素折行滚动区 + 复制/关闭）。变高行布局机制（`RowLayout`/`ensure_layout`/`wrap_line_count`/`visual_cols`）整体删除，行高恒定后 `show_viewport` 前缀和退回 `show_rows`。**附带必修**：core 新增 `parse_line_multi`——拆壳后内嵌 `\n` 按行拆成独立 LogLine（子行继承记录时间戳、独立识别级别；TUI ingest/GUI ingest/demo 三处接入），单行视图下这类记录此前同样是坏的。`w` 热键、config `wrap_long_lines`、state `ui_wrap`、GUI 勾选框与 gui.toml `wrap` 键全部移除（serde 忽略旧配置残留键）。
+
+**测试**：core 新增 `docker多行记录_拆成多条_子行继承时间戳`；TUI `渲染_自动换行开关`→`渲染_详情面板长行折行`、`键盘_UI设置热键_wbvh`→`_bvh`；GUI 布局测试删除、新增 `ingest_多行记录拆分_子行继承时间戳`——105 用例全绿、clippy 0。
+
 ## 变更记录（v0.10.4，可执行名统一）
 
 打包产物统一为 `logtail-tui` / `logtail-gui`：TUI `[[bin]]` 弃用历史名 `logtail`，与 crate 同名——`--version` 输出随之改 `logtail-tui vX.Y.Z`，`--check-config` 提示文案同步。文档全量同步（USAGE、TUI/GUI README、v0.10.3 变更记录的 crate 表、目录树），顺带修正 USAGE 滞留的 v0.7.0 版本注释。导出文件前缀 `logtail-<源>-<时间戳>.log` 与排障日志 `logtail.log` 属运行期产物，保持不变。工程面：移除重构遗留的 `logtail-core/Cargo.lock`（workspace 下仅根 Cargo.lock 入库）。
@@ -1317,8 +1325,7 @@ name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
 
-[ui]                            # [v0.9] UI 显示设置（热键 w/b/v/h 即时切换，退出经 state.toml 记住）
-wrap_long_lines = false         # 长行自动换行（false=截断+←→ 横滚）
+[ui]                            # [v0.9] UI 显示设置（热键 b/v/h 即时切换，退出经 state.toml 记住）
 show_sparkline = true           # 日志量时间轴
 show_sidebar = true             # 侧栏（隐藏后日志区全宽）
 show_hints = true               # 状态栏键位提示
@@ -1394,8 +1401,8 @@ pub struct AppState {
     /// [v0.4 P2#2] 命中缓存，见 ViewCache
     pub view_cache: ViewCache,
 
-    // ---- UI 设置（[v0.9]，热键 w/b/v/h，退出持久化）----
-    pub ui: UiState,   // wrap_long_lines / show_sidebar / show_sparkline / show_hints
+    // ---- UI 设置（[v0.9]，热键 b/v/h，退出持久化）----
+    pub ui: UiState,   // show_sidebar / show_sparkline / show_hints
 
     // ---- 视图 ----
     pub selected_line_no: Option<u64>,     // 只认 line_no，不认下标
@@ -1973,7 +1980,6 @@ pub async fn main_loop(terminal: &mut Terminal, mut st: AppState) -> anyhow::Res
 | `L` | 加载更早（since 前移；Full→24h、Quick 翻倍、Range 窗口平移 [v0.7]） | 正常 | 重建会话 |
 | `R` | 重连 | 全局 | 先 `shutdown` 旧会话 |
 | `q` | 退出 | 日志区 | [v0.7.5] 侧栏聚焦时 `q` 只退出侧栏（误按不杀程序） |
-| `w` | 长行自动换行 开/关 | 正常 | [v0.9] 开=折行看全文；关=截断+`←→` 横滚 |
 | `b` | 侧栏 显示/隐藏 | 正常 | [v0.9] 隐藏后日志区全宽；`Tab` 自动先显示再聚焦 |
 | `v` | 日志量时间轴 显示/隐藏 | 正常 | [v0.9] |
 | `h` | 状态栏键位提示 显示/隐藏 | 正常 | [v0.9] |

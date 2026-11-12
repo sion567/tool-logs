@@ -87,7 +87,14 @@ impl ActiveSession {
             log.teardown().await;
         });
 
-        (Self { handle, stop_tx, rx }, jh)
+        (
+            Self {
+                handle,
+                stop_tx,
+                rx,
+            },
+            jh,
+        )
     }
 
     /// 外部请求断开：通知泵退出，泵内 teardown 关 channel
@@ -98,10 +105,7 @@ impl ActiveSession {
     /// [v0.8 §20] 本地文件流泵：tail 语义（先回放末尾 N 行，之后 300ms 轮询增长）。
     /// 不经 SSH——`local` 源的本地流双模（过滤/详情/导出与远端源完全一致）。
     /// 打开失败不 panic：错误行 + Ended 发给主循环，状态栏可见。
-    pub fn spawn_local_file(
-        path: String,
-        tail: usize,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
+    pub fn spawn_local_file(path: String, tail: usize) -> (Self, tokio::task::JoinHandle<()>) {
         use crate::ssh::stream::LineBuffer;
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(1024);
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();

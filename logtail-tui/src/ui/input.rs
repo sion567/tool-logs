@@ -67,9 +67,7 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             st.should_quit = true;
         }
-        (KeyCode::Char('C') | KeyCode::Char('c'), m)
-            if !m.contains(KeyModifiers::CONTROL) =>
-        {
+        (KeyCode::Char('C') | KeyCode::Char('c'), m) if !m.contains(KeyModifiers::CONTROL) => {
             clear_screen(st) // 大小写都清屏；Ctrl+C 退出由上面分支优先
         }
         // [v0.5] 多源 tab 切换：, 前一个 / . 后一个（不拆流）
@@ -88,9 +86,7 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('P') | KeyCode::Char('p'), _) => {
             st.pending = Some(PendingAction::TogglePrefilter)
         } // [v0.6]
-        (KeyCode::Char('e') | KeyCode::Char('E'), _) => {
-            st.pending = Some(PendingAction::Export)
-        } // [v0.7]
+        (KeyCode::Char('e') | KeyCode::Char('E'), _) => st.pending = Some(PendingAction::Export), // [v0.7]
         // 重连保持大写 R（Shift+R / CapsLock）：小写 r 是正则切换，语义有意区分
         (KeyCode::Char('R'), _) => st.pending = Some(PendingAction::Reconnect),
         (KeyCode::Char('L') | KeyCode::Char('l'), _) => {
@@ -118,13 +114,6 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
         (KeyCode::Char('4'), _) => set_level(st, LevelFilter::Debug),
         (KeyCode::Char('0'), _) => set_level(st, LevelFilter::All),
         // [v0.9] UI 显示设置热键
-        (KeyCode::Char('w'), _) => {
-            st.ui.wrap_long_lines = !st.ui.wrap_long_lines;
-            st.status_msg = format!(
-                "自动换行: {}",
-                if st.ui.wrap_long_lines { "开（长行折行显示全文）" } else { "关（截断+←→ 横滚）" }
-            );
-        }
         (KeyCode::Char('b'), _) => {
             st.ui.show_sidebar = !st.ui.show_sidebar;
             if !st.ui.show_sidebar {
@@ -132,25 +121,44 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             }
             st.status_msg = format!(
                 "侧栏: {}",
-                if st.ui.show_sidebar { "显示" } else { "隐藏（日志区全宽）" }
+                if st.ui.show_sidebar {
+                    "显示"
+                } else {
+                    "隐藏（日志区全宽）"
+                }
             );
         }
         (KeyCode::Char('v'), _) => {
             st.ui.show_sparkline = !st.ui.show_sparkline;
-            st.status_msg = format!("时间轴: {}", if st.ui.show_sparkline { "显示" } else { "隐藏" });
+            st.status_msg = format!(
+                "时间轴: {}",
+                if st.ui.show_sparkline {
+                    "显示"
+                } else {
+                    "隐藏"
+                }
+            );
         }
         (KeyCode::Char('S'), _) => {
             st.ui.dedupe = !st.ui.dedupe;
             st.status_msg = format!(
                 "相似行折叠: {}",
-                if st.ui.dedupe { "开（连续相同消息合并 ×N）" } else { "关" }
+                if st.ui.dedupe {
+                    "开（连续相同消息合并 ×N）"
+                } else {
+                    "关"
+                }
             );
         }
         (KeyCode::Char('h'), _) => {
             st.ui.show_hints = !st.ui.show_hints;
             st.status_msg = format!(
                 "键位提示: {}",
-                if st.ui.show_hints { "显示" } else { "隐藏（状态栏更清爽）" }
+                if st.ui.show_hints {
+                    "显示"
+                } else {
+                    "隐藏（状态栏更清爽）"
+                }
             );
         }
         (KeyCode::Tab, _) => {
@@ -207,7 +215,9 @@ fn handle_sidebar_key(key: KeyEvent, st: &mut AppState) {
             let entries = st.sidebar_entries();
             if let Some((entry, _)) = entries.get(st.sidebar.sel) {
                 match entry {
-                    SideEntry::Source(sid) => st.pending = Some(PendingAction::Connect(sid.clone())),
+                    SideEntry::Source(sid) => {
+                        st.pending = Some(PendingAction::Connect(sid.clone()))
+                    }
                     SideEntry::Preset(key) => {
                         st.pending = Some(PendingAction::ApplyPreset(key.clone()))
                     }
@@ -316,10 +326,16 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
         FilterState::Idle => {
             // 路由层（routes_to_filter）保证 Idle 只有 '/' 进得来；
             // Idle 无生效过滤（§11.2），输入框从空开始
-            st.filter_state = FilterState::Typing { input: String::new(), cursor: 0 };
+            st.filter_state = FilterState::Typing {
+                input: String::new(),
+                cursor: 0,
+            };
         }
 
-        FilterState::Typing { mut input, mut cursor } => {
+        FilterState::Typing {
+            mut input,
+            mut cursor,
+        } => {
             match (key.code, key.modifiers) {
                 (KeyCode::Enter, _) => {
                     if input.is_empty() {
@@ -350,9 +366,7 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                 // [v0.7.2] `r` 不再是正则切换键——它必须能作为普通字符输入
                 // （过滤词 "error" 里的 r 曾把正则来回切，字母打不进去）。
                 // 正则切换改用 Ctrl+R（全局，见 main_loop）或非编辑态的 r。
-                (KeyCode::Char(c), m)
-                    if m.is_empty() || m == KeyModifiers::SHIFT =>
-                {
+                (KeyCode::Char(c), m) if m.is_empty() || m == KeyModifiers::SHIFT => {
                     // SHIFT 放行：否则大写字母根本无法输入（is_empty 会丢掉 Shift+E）
                     edit_insert(&mut input, &mut cursor, c); // 按字符计数，多字节安全
                     st.filter_state = FilterState::Typing { input, cursor };
@@ -394,7 +408,10 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                     FilterMode::None => String::new(),
                 };
                 let cursor = text.chars().count(); // 字符数光标（多字节安全）
-                st.filter_state = FilterState::Typing { input: text, cursor };
+                st.filter_state = FilterState::Typing {
+                    input: text,
+                    cursor,
+                };
             }
             KeyCode::Esc => {
                 st.filter_state = FilterState::Idle; // 清空过滤 → Idle
@@ -456,7 +473,9 @@ pub fn handle_detail_key(key: KeyEvent, st: &mut AppState) {
 
 /// `c`：复制选中行原文（§16.7 arboard；失败只提示不崩）
 fn copy_selected(st: &mut AppState) {
-    let Some(no) = st.selected_line_no else { return };
+    let Some(no) = st.selected_line_no else {
+        return;
+    };
     let Some(line) = st.current_buffer().by_line_no(no) else {
         st.status_msg = "该行已被淘汰".into();
         return;
@@ -484,7 +503,9 @@ pub fn context_block_text(
 
 /// `C`：复制选中行 ±N 上下文块（v0.10.2：详情面板里把一段现场一次带走）
 fn copy_context_block(st: &mut AppState) {
-    let Some(panel) = st.detail_panel.clone() else { return };
+    let Some(panel) = st.detail_panel.clone() else {
+        return;
+    };
     let text = context_block_text(
         st.current_buffer(),
         panel.line_no,
@@ -549,10 +570,10 @@ mod tests {
 
     use super::*;
     use crate::app::{execute_pending, AppState, PendingAction, SideEntry};
-    use logtail_core::config::{Config, PresetCfg, SourceConfig};
-    use logtail_core::config::server::ServerConfig;
-    use logtail_core::log::{FilterMode, FilterState, LevelFilter};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use logtail_core::config::server::ServerConfig;
+    use logtail_core::config::{Config, PresetCfg, SourceConfig};
+    use logtail_core::log::{FilterMode, FilterState, LevelFilter};
     use std::collections::BTreeMap;
 
     // ---- 自 core filter.rs 移入的键盘层用例（§17）----
@@ -571,7 +592,13 @@ mod tests {
         assert!(routes_to_filter(&slash, &FilterState::Idle));
         assert!(!routes_to_filter(&a, &FilterState::Idle));
         // Typing：全收
-        assert!(routes_to_filter(&a, &FilterState::Typing { input: "x".into(), cursor: 1 }));
+        assert!(routes_to_filter(
+            &a,
+            &FilterState::Typing {
+                input: "x".into(),
+                cursor: 1
+            }
+        ));
         // Active：只消费 / Esc r；R 重连、↑ 导航、字母透传正常层（v0.7.3 修复重连失效）
         assert!(routes_to_filter(&slash, &active));
         assert!(routes_to_filter(&esc, &active));
@@ -617,7 +644,9 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 22,
             user: "root".into(),
-            auth: logtail_core::config::AuthCfg::Password { password: "x".into() },
+            auth: logtail_core::config::AuthCfg::Password {
+                password: "x".into(),
+            },
             sudo: false,
             sudo_password: None,
         });
@@ -692,7 +721,10 @@ mod tests {
             handle_filter_key(key(c), &mut st);
         }
         handle_filter_key(enter(), &mut st);
-        assert!(matches!(st.filter_state, FilterState::Error(_)), "正则错落 Error");
+        assert!(
+            matches!(st.filter_state, FilterState::Error(_)),
+            "正则错落 Error"
+        );
         assert!(st.status_msg.contains("正则编译失败"), "错误文案走状态栏");
         // Esc/Enter 回 Typing 保留原输入
         handle_filter_key(esc(), &mut st);
@@ -765,42 +797,75 @@ mod tests {
         // [v0.7.4] 提示条写明文小写，键必须大小写都认；r/R 语义有意区分
         let mut st = test_state();
         let mut buf = logtail_core::log::LogBuffer::new(10);
-        buf.push(logtail_core::log::LogLine { raw: "x".into(), ..Default::default() }); // 清屏需要非空 buffer
+        buf.push(logtail_core::log::LogLine {
+            raw: "x".into(),
+            ..Default::default()
+        }); // 清屏需要非空 buffer
         st.buffers.insert("test".into(), buf);
         st.active_source = Some("test".into());
 
         // l/L 都触发回放
-        handle_normal_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(matches!(st.pending, Some(PendingAction::LoadEarlier)));
         st.pending = None;
-        handle_normal_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(matches!(st.pending, Some(PendingAction::LoadEarlier)));
         st.pending = None;
 
         // p/P 都触发远筛
-        handle_normal_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(matches!(st.pending, Some(PendingAction::TogglePrefilter)));
         st.pending = None;
 
         // c/c 清屏（有 buffer 才生效）
         st.last_rebuild = 0;
-        handle_normal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(st.cleared_before.is_some(), "小写 c 清屏");
         st.cleared_before = None;
-        handle_normal_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(st.cleared_before.is_some(), "大写 C 清屏");
 
         // g/G 都跳最新（无选中时也不 panic）
-        handle_normal_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &mut st);
-        handle_normal_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &mut st,
+        );
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+            &mut st,
+        );
 
         // r 与 R 语义区分：小写 r 切正则、大写 R 重连
         assert!(!st.regex_mode);
-        handle_normal_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut st,
+        );
         assert!(st.regex_mode, "小写 r = 正则切换");
         st.regex_mode = false;
-        handle_normal_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE), &mut st);
-        assert!(matches!(st.pending, Some(PendingAction::Reconnect)), "大写 R = 重连");
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE),
+            &mut st,
+        );
+        assert!(
+            matches!(st.pending, Some(PendingAction::Reconnect)),
+            "大写 R = 重连"
+        );
         st.pending = None;
         assert!(!st.regex_mode, "大写 R 不得触发正则切换");
     }
@@ -817,7 +882,14 @@ mod tests {
         assert!(!detail_consumes(&slash), "/ 过滤透传（路由层处理）");
         // 面板自己的键（大小写都认）
         for c in ['q', 'Q', 'c', 'C', 't', 'T', 'p', 'P'] {
-            let k = KeyEvent::new(KeyCode::Char(c), if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE });
+            let k = KeyEvent::new(
+                KeyCode::Char(c),
+                if c.is_uppercase() {
+                    KeyModifiers::SHIFT
+                } else {
+                    KeyModifiers::NONE
+                },
+            );
             assert!(detail_consumes(&k), "{c} 应被面板消费");
         }
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
@@ -837,7 +909,10 @@ mod tests {
         assert!(!st.should_quit, "q 不得退出程序");
         // Q 同样
         st.sidebar.focus = true;
-        handle_sidebar_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT), &mut st);
+        handle_sidebar_key(
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
+            &mut st,
+        );
         assert!(!st.sidebar.focus && !st.should_quit);
     }
 
@@ -849,7 +924,10 @@ mod tests {
             handle_filter_key(key(c), &mut st);
         }
         // Ctrl+H = 旧式 Backspace，不得插入字母 h
-        handle_filter_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL), &mut st);
+        handle_filter_key(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            &mut st,
+        );
         match &st.filter_state {
             FilterState::Typing { input, .. } => assert_eq!(input, "ab", "Ctrl+H 退格而非插 h"),
             other => panic!("{other:?}"),
@@ -868,12 +946,9 @@ mod tests {
     }
 
     #[test]
-    fn 键盘_UI设置热键_wbvh() {
-        // [v0.9]
+    fn 键盘_UI设置热键_bvh() {
+        // [v0.9]；[v0.10.5] w 键撤销（主视图固定单行，长行看详情面板）
         let mut st = test_state();
-        assert!(!st.ui.wrap_long_lines);
-        handle_normal_key(key('w'), &mut st);
-        assert!(st.ui.wrap_long_lines, "w 切换换行");
         handle_normal_key(key('b'), &mut st);
         assert!(!st.ui.show_sidebar, "b 隐藏侧栏");
         handle_normal_key(key('v'), &mut st);
@@ -881,11 +956,10 @@ mod tests {
         handle_normal_key(key('h'), &mut st);
         assert!(!st.ui.show_hints, "h 隐藏键位提示");
         // 再按全部切回
-        for c in "wbvh".chars() {
+        for c in "bvh".chars() {
             handle_normal_key(key(c), &mut st);
         }
         assert!(st.ui.show_sidebar && st.ui.show_sparkline && st.ui.show_hints);
-        assert!(!st.ui.wrap_long_lines);
     }
 
     #[test]
@@ -918,7 +992,10 @@ mod tests {
         handle_sidebar_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
         let entries = st.sidebar_entries();
         let sel_entry = &entries[st.sidebar.sel].0;
-        assert!(matches!(sel_entry, SideEntry::Source(sid) if sid == "prod-api"), "跳过分组头落在源上");
+        assert!(
+            matches!(sel_entry, SideEntry::Source(sid) if sid == "prod-api"),
+            "跳过分组头落在源上"
+        );
         // Enter → pending Connect
         handle_sidebar_key(enter(), &mut st);
         assert!(matches!(st.pending, Some(PendingAction::Connect(_))));
@@ -926,7 +1003,9 @@ mod tests {
         // 选中预设条目 → Enter → ApplyPreset → execute_pending 生效
         loop {
             handle_sidebar_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
-            if matches!(entries[st.sidebar.sel].0, SideEntry::Preset(_)) { break; }
+            if matches!(entries[st.sidebar.sel].0, SideEntry::Preset(_)) {
+                break;
+            }
             assert!(st.sidebar.sel + 1 < entries.len(), "没找到预设条目");
         }
         handle_sidebar_key(enter(), &mut st);
@@ -934,10 +1013,15 @@ mod tests {
             panic!("应为 ApplyPreset");
         };
         // 异步执行（与主循环同路径）：since 变更但无激活源，跳过重连
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(execute_pending(&mut st, PendingAction::ApplyPreset(k)));
         assert_eq!(st.level_filter, LevelFilter::Error, "预设 level 生效");
-        assert!(matches!(st.mode, logtail_core::source::ModeVariant::Quick { .. }), "预设 since 切 Quick");
+        assert!(
+            matches!(st.mode, logtail_core::source::ModeVariant::Quick { .. }),
+            "预设 since 切 Quick"
+        );
     }
 
     #[test]
@@ -947,13 +1031,20 @@ mod tests {
         handle_normal_key(key('f'), &mut st);
         assert!(st.pending.is_none(), "首按 f 不应直接执行");
         assert!(st.pending_confirm.is_some());
-        assert!(st.status_msg.contains("再按 f"), "确认提示: {}", st.status_msg);
+        assert!(
+            st.status_msg.contains("再按 f"),
+            "确认提示: {}",
+            st.status_msg
+        );
         // 第二次 f：执行
         handle_normal_key(key('f'), &mut st);
         assert!(matches!(st.pending, Some(PendingAction::CycleMode)));
         assert!(st.pending_confirm.is_none());
         st.pending = None;
-        handle_normal_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), &mut st);
+        handle_normal_key(
+            KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT),
+            &mut st,
+        );
         assert!(matches!(st.pending, Some(PendingAction::Reconnect)));
         // Tab 返回日志区焦点
         handle_normal_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut st);
@@ -967,7 +1058,10 @@ mod tests {
         use logtail_core::log::LogBuffer;
         let mut b = LogBuffer::new(10);
         for s in ["l0", "l1", "l2", "l3", "l4", "l5"] {
-            b.push(logtail_core::log::LogLine { raw: s.into(), ..Default::default() });
+            b.push(logtail_core::log::LogLine {
+                raw: s.into(),
+                ..Default::default()
+            });
         }
         // no=3 ±2 → l1..l5，按顺序 \n 拼接
         assert_eq!(context_block_text(&b, 3, 2, 2), "l1\nl2\nl3\nl4\nl5");
@@ -976,9 +1070,15 @@ mod tests {
         // 淘汰行跳过：容量 2 后只剩 l4,l5（no=4,5）
         let mut small = LogBuffer::new(2);
         for s in ["a", "b", "c", "d", "e"] {
-            small.push(logtail_core::log::LogLine { raw: s.into(), ..Default::default() });
+            small.push(logtail_core::log::LogLine {
+                raw: s.into(),
+                ..Default::default()
+            });
         }
-        assert_eq!(context_block_text(&small, 4, 3, 3), "d
-e");
+        assert_eq!(
+            context_block_text(&small, 4, 3, 3),
+            "d
+e"
+        );
     }
 }

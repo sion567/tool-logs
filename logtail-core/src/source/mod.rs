@@ -93,21 +93,28 @@ impl LogSource {
     /// 不变式：所有用户可控字段先 check_ident / check_time_value，再 shell_quote（§3.3③）。
     pub fn to_command(&self, mode: &ModeVariant) -> Result<String, LogtailError> {
         match self {
-            LogSource::Docker { container, tail, follow, since, until } => {
-                docker::docker_command(container, *tail, *follow, since.as_ref(), until.as_ref(), mode)
-            }
+            LogSource::Docker {
+                container,
+                tail,
+                follow,
+                since,
+                until,
+            } => docker::docker_command(
+                container,
+                *tail,
+                *follow,
+                since.as_ref(),
+                until.as_ref(),
+                mode,
+            ),
             LogSource::File { path, tail } => file::file_command(path, *tail, mode),
             LogSource::Journalctl { service, since } => {
                 journal::journal_command(service, since.as_ref(), mode)
             }
             LogSource::Command { cmd } => Ok(cmd.clone()), // 不走校验，用户自己承担
-            LogSource::Loki { url, query, limit } => {
-                loki::loki_command(url, query, *limit, mode)
-            }
+            LogSource::Loki { url, query, limit } => loki::loki_command(url, query, *limit, mode),
             // 本地源不经远端命令（app 层走本地泵）；此串仅作语义占位
-            LogSource::LocalFile { path, tail } => {
-                file::file_command(path, *tail, mode)
-            }
+            LogSource::LocalFile { path, tail } => file::file_command(path, *tail, mode),
         }
     }
 }
@@ -117,7 +124,9 @@ impl LogSource {
 pub enum ModeVariant {
     #[default]
     Full,
-    Quick { since: Option<String> },
+    Quick {
+        since: Option<String>,
+    },
     /// (since, until)，不带 -f
     Range(String, String),
 }
@@ -176,9 +185,8 @@ pub fn is_safe_ident(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    s.chars().all(|c| {
-        c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ':' | '@')
-    })
+    s.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ':' | '@'))
 }
 
 pub fn check_ident(s: &str, what: &str) -> Result<(), LogtailError> {
@@ -205,9 +213,8 @@ pub fn is_safe_time(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
-    s.chars().all(|c| {
-        c.is_alphanumeric() || matches!(c, '-' | ':' | '.' | '+' | ' ')
-    })
+    s.chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '-' | ':' | '.' | '+' | ' '))
 }
 
 pub fn check_time_value(s: &str) -> Result<(), LogtailError> {
@@ -229,9 +236,32 @@ pub fn is_safe_pattern(s: &str) -> bool {
         c.is_alphanumeric()
             || matches!(
                 c,
-                ' ' | '-' | '_' | '.' | ':' | '/' | ',' | '?' | '=' | '+' | '%' | '@' | '#'
-                    | '~' | '^' | '*' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '<' | '>'
-                    | '!' | '\\'
+                ' ' | '-'
+                    | '_'
+                    | '.'
+                    | ':'
+                    | '/'
+                    | ','
+                    | '?'
+                    | '='
+                    | '+'
+                    | '%'
+                    | '@'
+                    | '#'
+                    | '~'
+                    | '^'
+                    | '*'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '{'
+                    | '}'
+                    | '|'
+                    | '<'
+                    | '>'
+                    | '!'
+                    | '\\'
             )
     })
 }
@@ -286,7 +316,10 @@ mod tests {
 
     #[test]
     fn journalctl_range_不带_f() {
-        let src = LogSource::Journalctl { service: "nginx".into(), since: None };
+        let src = LogSource::Journalctl {
+            service: "nginx".into(),
+            since: None,
+        };
         let cmd = src
             .to_command(&ModeVariant::Range(
                 "2026-01-05T10:00:00+08:00".into(),
@@ -299,9 +332,14 @@ mod tests {
 
     #[test]
     fn journalctl_quick_since_取自_mode() {
-        let src = LogSource::Journalctl { service: "nginx".into(), since: None };
+        let src = LogSource::Journalctl {
+            service: "nginx".into(),
+            since: None,
+        };
         let cmd = src
-            .to_command(&ModeVariant::Quick { since: Some("30m".into()) })
+            .to_command(&ModeVariant::Quick {
+                since: Some("30m".into()),
+            })
             .unwrap();
         assert!(cmd.contains("--since") && cmd.contains("2026"), "{cmd}");
     }
@@ -311,7 +349,10 @@ mod tests {
         assert!(check_time_value("2026-01-05T10:00:00+08:00").is_ok());
         assert!(check_time_value("2026-01-05 14:02:04").is_ok());
         assert!(check_time_value("30m").is_ok());
-        assert!(matches!(check_time_value("x;rm"), Err(LogtailError::UnsafeInput(_))));
+        assert!(matches!(
+            check_time_value("x;rm"),
+            Err(LogtailError::UnsafeInput(_))
+        ));
     }
 
     #[test]
@@ -319,11 +360,26 @@ mod tests {
         assert!(check_pattern("db error|timeout.*retry").is_ok());
         assert!(check_pattern("ERR(?i)x").is_ok()); // ? ( ) i 放行
         assert!(check_pattern("^\\d{3}-[A-Z]+").is_ok()); // ^ { } [ ] - 反斜杠 放行
-        assert!(matches!(check_pattern("x'; rm -rf /"), Err(LogtailError::UnsafeInput(_))));
-        assert!(matches!(check_pattern("a`id`b"), Err(LogtailError::UnsafeInput(_))));
-        assert!(matches!(check_pattern("$(id)"), Err(LogtailError::UnsafeInput(_)))); // $ 拒
-        assert!(matches!(check_pattern("a&b"), Err(LogtailError::UnsafeInput(_))));
-        assert!(matches!(check_pattern(""), Err(LogtailError::UnsafeInput(_))));
+        assert!(matches!(
+            check_pattern("x'; rm -rf /"),
+            Err(LogtailError::UnsafeInput(_))
+        ));
+        assert!(matches!(
+            check_pattern("a`id`b"),
+            Err(LogtailError::UnsafeInput(_))
+        ));
+        assert!(matches!(
+            check_pattern("$(id)"),
+            Err(LogtailError::UnsafeInput(_))
+        )); // $ 拒
+        assert!(matches!(
+            check_pattern("a&b"),
+            Err(LogtailError::UnsafeInput(_))
+        ));
+        assert!(matches!(
+            check_pattern(""),
+            Err(LogtailError::UnsafeInput(_))
+        ));
     }
 
     #[test]
@@ -345,7 +401,10 @@ mod tests {
             until: None,
         };
         let cmd = src
-            .to_command(&ModeVariant::Range("2026-01-05 10:00:00".into(), "2026-01-05 11:00:00".into()))
+            .to_command(&ModeVariant::Range(
+                "2026-01-05 10:00:00".into(),
+                "2026-01-05 11:00:00".into(),
+            ))
             .unwrap();
         assert!(!cmd.contains(" -f"), "{cmd}");
         assert!(cmd.contains("--since") && cmd.contains("--until"), "{cmd}");

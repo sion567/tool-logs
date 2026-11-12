@@ -66,7 +66,10 @@ mod tests {
     fn 相对时长换算为绝对时间() {
         let abs = parse_journal_since("30m");
         assert!(abs.contains("2026"), "RFC3339 含年份: {abs}");
-        assert!(abs.contains('T') || abs.contains('+') || abs.contains('Z'), "{abs}");
+        assert!(
+            abs.contains('T') || abs.contains('+') || abs.contains('Z'),
+            "{abs}"
+        );
     }
 
     #[test]

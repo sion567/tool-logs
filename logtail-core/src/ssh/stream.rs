@@ -163,7 +163,11 @@ mod tests {
         // 2MB 无换行 → partial 被限制在 1MB
         let junk = "z".repeat(2 * 1024 * 1024);
         assert!(lb.push(junk.as_bytes()).is_empty());
-        assert!(lb.partial().len() <= MAX_PARTIAL, "partial 必须有界: {}", lb.partial().len());
+        assert!(
+            lb.partial().len() <= MAX_PARTIAL,
+            "partial 必须有界: {}",
+            lb.partial().len()
+        );
         // 尾部数据仍在，成行后可见
         let got = lb.push(b"tail-marker\n");
         assert_eq!(got.len(), 1);

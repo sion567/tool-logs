@@ -21,15 +21,19 @@ async fn main() -> Result<()> {
         logtail_core::config::append_log(&format!(
             "启动 logtail v{}（TUI，工作目录 {:?}）",
             env!("CARGO_PKG_VERSION"),
-            std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default()
+            std::env::current_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default()
         ));
         let result = match logtail_core::config::load() {
             Ok(config) => logtail_tui::app::run(config).await,
             Err(e) => {
                 // [v0.7.1] 启动失败也落盘：双击闪退时终端一闪而过，日志里永远有痕
                 logtail_core::config::append_log(&format!("启动失败: {e:#}"));
-                eprintln!("启动失败（详情见 ~/.config/logtail/logtail.log）：
-{e:#}");
+                eprintln!(
+                    "启动失败（详情见 ~/.config/logtail/logtail.log）：
+{e:#}"
+                );
                 eprintln!("提示：运行 --check-config 校验配置");
                 Err(e)
             }
@@ -47,26 +51,46 @@ fn check_config(path: Option<&String>) -> Result<()> {
         None => std::fs::read_to_string(logtail_core::config::config_dir().join("config.toml"))?,
     };
     let cfg: logtail_core::config::Config = toml::from_str(&content).map_err(|e| {
-        anyhow::anyhow!("TOML 解析失败: {e}
-提示：字符串里的特殊字符用 \"\" 包裹；表格键不要重复")
+        anyhow::anyhow!(
+            "TOML 解析失败: {e}
+提示：字符串里的特殊字符用 \"\" 包裹；表格键不要重复"
+        )
     })?;
     println!("✔ TOML 解析通过");
-    println!("✔ general: max_buffer_lines={}", cfg.general.max_buffer_lines);
+    println!(
+        "✔ general: max_buffer_lines={}",
+        cfg.general.max_buffer_lines
+    );
     if cfg.servers.is_empty() {
         println!("⚠ 没有配置任何 [[servers]]——侧栏将无服务器可选");
     }
     for srv in &cfg.servers {
-        println!("✔ server [{}]: {}@{}:{}（密码认证）", srv.name, srv.user, srv.host, srv.port);
+        println!(
+            "✔ server [{}]: {}@{}:{}（密码认证）",
+            srv.name, srv.user, srv.host, srv.port
+        );
     }
     for src in &cfg.sources {
         let known = cfg.servers.iter().any(|s| s.name == src.server);
         if !known {
-            println!("✘ source [{}]: 引用的服务器 \"{}\" 不存在于 [[servers]]——连接必然失败", src.name, src.server);
+            println!(
+                "✘ source [{}]: 引用的服务器 \"{}\" 不存在于 [[servers]]——连接必然失败",
+                src.name, src.server
+            );
         } else {
-            println!("✔ source [{}] → server [{}], {:?}", src.name, src.server, src.source.source_type());
+            println!(
+                "✔ source [{}] → server [{}], {:?}",
+                src.name,
+                src.server,
+                src.source.source_type()
+            );
         }
     }
-    let bad: Vec<_> = cfg.sources.iter().filter(|s| !cfg.servers.iter().any(|x| x.name == s.server)).collect();
+    let bad: Vec<_> = cfg
+        .sources
+        .iter()
+        .filter(|s| !cfg.servers.iter().any(|x| x.name == s.server))
+        .collect();
     if !bad.is_empty() {
         anyhow::bail!("{} 个源的 server 引用无效，修正后再启动", bad.len());
     }
@@ -90,7 +114,9 @@ fn init_tracing() {
                 .create(true)
                 .append(true)
                 .open("logtail.log")
-                .unwrap_or_else(|_| std::fs::File::create("logtail.log").expect("日志文件完全不可写"))
+                .unwrap_or_else(|_| {
+                    std::fs::File::create("logtail.log").expect("日志文件完全不可写")
+                })
         })
         .try_init();
 }

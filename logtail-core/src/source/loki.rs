@@ -10,7 +10,10 @@ use crate::error::LogtailError;
 
 /// [v0.8] Loki URL 白名单：必须 http(s):// 开头，其余仅 URL 安全字符
 pub fn check_loki_url(s: &str) -> Result<(), LogtailError> {
-    let Some(rest) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) else {
+    let Some(rest) = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+    else {
         return Err(LogtailError::UnsafeInput(format!(
             "Loki URL 必须以 http:// 或 https:// 开头: {s}"
         )));
@@ -31,9 +34,9 @@ pub fn check_logql(s: &str) -> Result<(), LogtailError> {
     if s.is_empty() {
         return Err(LogtailError::UnsafeInput("LogQL 查询为空".into()));
     }
-    if s.chars().any(|c| {
-        matches!(c, '\'' | '$' | ';' | '&' | '`') || (c as u32) < 0x20
-    }) {
+    if s.chars()
+        .any(|c| matches!(c, '\'' | '$' | ';' | '&' | '`') || (c as u32) < 0x20)
+    {
         return Err(LogtailError::UnsafeInput(format!("LogQL 查询非法: {s}")));
     }
     Ok(())
@@ -90,8 +93,9 @@ pub fn loki_command(
                 match loki_duration(s) {
                     Some(d) => params.push(format!("--data-urlencode since={d}")),
                     None => {
-                        let ns = rfc3339_to_nanos(s)
-                            .ok_or_else(|| LogtailError::ConfigError(format!("since 无法解析: {s}")))?;
+                        let ns = rfc3339_to_nanos(s).ok_or_else(|| {
+                            LogtailError::ConfigError(format!("since 无法解析: {s}"))
+                        })?;
                         params.push(format!("--data-urlencode start={ns}"));
                     }
                 }
@@ -167,17 +171,33 @@ mod tests {
         let full = loki_command(url, q, 1000, &ModeVariant::Full).unwrap();
         assert!(full.starts_with("curl -sG http://localhost:3100"), "{full}");
         assert!(full.contains("query='{job=\"myapp\"}'"), "{full}");
-        assert!(full.contains("limit=1000") && full.contains("sort_by"), "{full}");
-        assert!(!full.contains("since=") && !full.contains("start="), "{full}");
+        assert!(
+            full.contains("limit=1000") && full.contains("sort_by"),
+            "{full}"
+        );
+        assert!(
+            !full.contains("since=") && !full.contains("start="),
+            "{full}"
+        );
         // Quick 相对时长
-        let quick = loki_command(url, q, 500, &ModeVariant::Quick { since: Some("1h".into()) }).unwrap();
+        let quick = loki_command(
+            url,
+            q,
+            500,
+            &ModeVariant::Quick {
+                since: Some("1h".into()),
+            },
+        )
+        .unwrap();
         assert!(quick.contains("since=1h"), "{quick}");
         // Quick 绝对时间 → start
         let quick_abs = loki_command(
             url,
             q,
             500,
-            &ModeVariant::Quick { since: Some("1970-01-01T00:00:01Z".into()) },
+            &ModeVariant::Quick {
+                since: Some("1970-01-01T00:00:01Z".into()),
+            },
         )
         .unwrap();
         assert!(quick_abs.contains("start=1000000000"), "{quick_abs}");
@@ -189,7 +209,10 @@ mod tests {
             &ModeVariant::Range("1970-01-01T00:00:01Z".into(), "1970-01-01T00:00:02Z".into()),
         )
         .unwrap();
-        assert!(range.contains("start=1000000000") && range.contains("end=2000000000"), "{range}");
+        assert!(
+            range.contains("start=1000000000") && range.contains("end=2000000000"),
+            "{range}"
+        );
         // 注入面：query 含单引号被拒
         assert!(loki_command(url, "{job=\"x\"}'; rm", 100, &ModeVariant::Full).is_err());
     }

@@ -92,7 +92,10 @@ pub fn load() -> Result<Config> {
     }
     let s = fs::read_to_string(&path)?;
     toml::from_str(&s).map_err(|e| {
-        anyhow::Error::new(LogtailError::ConfigError(format!("{}: {e}", path.display())))
+        anyhow::Error::new(LogtailError::ConfigError(format!(
+            "{}: {e}",
+            path.display()
+        )))
     })
 }
 
@@ -103,9 +106,8 @@ pub struct StateFile {
     /// "full" | "quick" | "range"
     pub mode: Option<String>,
     pub since: Option<String>,
-    /// [v0.9] UI 显示设置热切换后的持久化（Some 覆盖 config 默认）
-    #[serde(default)]
-    pub ui_wrap: Option<bool>,
+    /// [v0.9] UI 显示设置热切换后的持久化（Some 覆盖 config 默认）；
+    /// [v0.10.5] ui_wrap 撤销（主视图固定单行），旧 state.toml 残留键被 serde 忽略
     #[serde(default)]
     pub ui_sidebar: Option<bool>,
     #[serde(default)]
@@ -125,8 +127,12 @@ fn state_path() -> PathBuf {
 /// [v0.8.2] 闪退判据：日志有"启动"无"正常退出" = 异常退出；旧版二进制则连本文件都没有。
 pub fn append_log(msg: &str) {
     let _ = fs::create_dir_all(config_dir());
-    let line = format!("[{}] {}
-", chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"), msg);
+    let line = format!(
+        "[{}] {}
+",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        msg
+    );
     let _ = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -181,18 +187,18 @@ auth={type=\"password\",password=\"x\"}",
 
     #[test]
     fn ui配置节解析与缺省() {
-        // [v0.9] [ui] 节：显式值生效；缺省 wrap=false 其余 true
+        // [v0.9] [ui] 节：显式值生效；其余取缺省。旧配置残留 wrap_long_lines 键被 serde 忽略
         let t = r#"
 [ui]
-wrap_long_lines = true
 show_sidebar = false
 "#;
         let cfg: Config = toml::from_str(t).unwrap();
-        assert!(cfg.ui.wrap_long_lines);
         assert!(!cfg.ui.show_sidebar);
         assert!(cfg.ui.show_sparkline && cfg.ui.show_hints, "未设置的取缺省");
         let cfg2: Config = toml::from_str("default_tail = 1").unwrap();
-        assert!(!cfg2.ui.wrap_long_lines && cfg2.ui.show_hints);
+        assert!(cfg2.ui.show_hints);
+        let cfg3: Config = toml::from_str("[ui]\nwrap_long_lines = true\n").unwrap();
+        assert!(cfg3.ui.show_hints, "已废弃的 ui 键不阻断解析");
     }
 
     #[test]
@@ -245,6 +251,8 @@ source = { type = "local", path = "/tmp/x.log", tail = 50 }
         let w: Wrap = toml::from_str(r#"auth = { type = "password", password = "x" }"#).unwrap();
         assert!(matches!(w.auth, AuthCfg::Password { password } if password == "x"));
         let w: Wrap = toml::from_str(r#"auth = { type = "key", path = "~/.ssh/id_rsa" }"#).unwrap();
-        assert!(matches!(w.auth, AuthCfg::Key { path, passphrase: None } if path == "~/.ssh/id_rsa"));
+        assert!(
+            matches!(w.auth, AuthCfg::Key { path, passphrase: None } if path == "~/.ssh/id_rsa")
+        );
     }
 }

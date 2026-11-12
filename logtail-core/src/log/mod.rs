@@ -12,7 +12,7 @@ pub use filter::{
     active_filter_of, matches_filter, rebuild_view, text_patterns, FilterMode, FilterState,
     LevelFilter, NO_FILTER,
 };
-pub use parser::{detect_level, parse_line};
+pub use parser::{detect_level, parse_line, parse_line_multi};
 
 use std::collections::HashMap;
 

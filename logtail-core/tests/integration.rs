@@ -33,7 +33,11 @@ async fn crlf_行尾不残留回车() -> anyhow::Result<()> {
     let port = spawn_sshd().await?;
     let (got, ended) = collect_until_ended(open_stream(port, "crlf").await?).await?;
     assert!(ended);
-    assert_eq!(got, vec!["hi", "second line"], "\\r 必须剥掉，否则污染级别检测与显示");
+    assert_eq!(
+        got,
+        vec!["hi", "second line"],
+        "\\r 必须剥掉，否则污染级别检测与显示"
+    );
     Ok(())
 }
 
@@ -44,7 +48,10 @@ async fn 高吞吐_500行分包_不丢不乱() -> anyhow::Result<()> {
     assert!(ended);
     assert_eq!(got.len(), 500, "行数必须完整（分包重组不丢行）");
     for (i, line) in got.iter().enumerate() {
-        assert!(line.starts_with(&format!("big-{i:04}-")), "顺序错位: 第{i}行={line}");
+        assert!(
+            line.starts_with(&format!("big-{i:04}-")),
+            "顺序错位: 第{i}行={line}"
+        );
     }
     Ok(())
 }
@@ -52,7 +59,9 @@ async fn 高吞吐_500行分包_不丢不乱() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn 泵_整批转发与EOF自退() -> anyhow::Result<()> {
     let port = spawn_sshd().await?;
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
     let connect_fut = connect("127.0.0.1", port, "tester", &auth);
     let sess = match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
         Ok(r) => r?,
@@ -83,7 +92,9 @@ async fn 泵_整批转发与EOF自退() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn 泵_停止路径_收到Ended() -> anyhow::Result<()> {
     let port = spawn_sshd().await?;
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
     let connect_fut = connect("127.0.0.1", port, "tester", &auth);
     let sess = match tokio::time::timeout(Duration::from_secs(15), connect_fut).await {
         Ok(r) => r?,
@@ -94,7 +105,9 @@ async fn 泵_停止路径_收到Ended() -> anyhow::Result<()> {
     let (session, _jh) = ActiveSession::spawn(sess, LogStream::new(ch));
 
     // 解构出 stop_tx/rx 模拟 §13 的 remove 路径：shutdown 信号 → 泵必须发 Ended 后退出
-    let ActiveSession { stop_tx, mut rx, .. } = session;
+    let ActiveSession {
+        stop_tx, mut rx, ..
+    } = session;
     let _ = stop_tx.send(());
 
     let mut ended = false;
@@ -119,11 +132,14 @@ async fn 本地流_回放与追加() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join(format!("logtail-local-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("app.log");
-    std::fs::write(&path, "l1
+    std::fs::write(
+        &path,
+        "l1
 l2
 l3
 l4
-")?;
+",
+    )?;
 
     let (mut sess, _jh) = ActiveSession::spawn_local_file(path.to_string_lossy().into_owned(), 2);
 
@@ -133,7 +149,9 @@ l4
         match sess.rx.try_recv() {
             Ok(StreamEvent::Lines(ls)) => got.extend(ls),
             Ok(StreamEvent::Ended) => break,
-            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
             Err(TryRecvError::Disconnected) => break,
         }
     }
@@ -148,7 +166,9 @@ l4
     for _ in 0..50 {
         match sess.rx.try_recv() {
             Ok(StreamEvent::Lines(ls)) => appended.extend(ls),
-            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(30)).await,
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await
+            }
             _ => break,
         }
         if !appended.is_empty() {
@@ -158,7 +178,9 @@ l4
     assert_eq!(appended, vec!["l5"], "追加行必须送达");
 
     // 停止：stop → 泵退出（rx 关闭）
-    let ActiveSession { stop_tx, mut rx, .. } = sess;
+    let ActiveSession {
+        stop_tx, mut rx, ..
+    } = sess;
     let _ = stop_tx.send(());
     let mut closed = false;
     for _ in 0..50 {
@@ -180,20 +202,26 @@ l4
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sudo密码流_写入stdin后服务端放行() -> anyhow::Result<()> {
     let port = spawn_sshd_sudo(Some("welcome01!".into())).await?;
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
     let sess = tokio::time::timeout(
         Duration::from_secs(15),
         connect("127.0.0.1", port, "tester", &auth),
     )
     .await??;
     let ch = sess.channel_open_session().await?;
-    ch.exec(true, "sudo -S -p '' docker logs -f x".as_bytes()).await?;
+    ch.exec(true, "sudo -S -p '' docker logs -f x".as_bytes())
+        .await?;
     // 与 do_connect 完全一致的密码写入路径
     {
         use tokio::io::AsyncWriteExt;
         let mut w = ch.make_writer();
-        w.write_all(b"welcome01!
-").await?;
+        w.write_all(
+            b"welcome01!
+",
+        )
+        .await?;
     }
     ch.eof().await?;
     let mut log = LogStream::new(ch);
@@ -220,7 +248,9 @@ async fn sudo密码流_写入stdin后服务端放行() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sudo_n_无NOPASSWD时报错不挂起() -> anyhow::Result<()> {
     let port = spawn_sshd().await?; // sudo_pw=None：模拟未启用
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
     let sess = tokio::time::timeout(
         Duration::from_secs(15),
         connect("127.0.0.1", port, "tester", &auth),
@@ -253,12 +283,17 @@ async fn tofu_首连记录_重连通过_篡改拒绝() -> anyhow::Result<()> {
     let port = spawn_sshd().await?;
     let kh = std::env::temp_dir().join(format!("logtail-kh-{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&kh);
-    let auth = AuthCfg::Password { password: "pw".into() };
+    let auth = AuthCfg::Password {
+        password: "pw".into(),
+    };
 
     // 首连（TOFU 记录）
     connect_with("127.0.0.1", port, "tester", &auth, &kh).await?;
     let recorded = std::fs::read_to_string(&kh)?;
-    assert!(recorded.contains(&format!("127.0.0.1:{port}")), "首连记录指纹: {recorded}");
+    assert!(
+        recorded.contains(&format!("127.0.0.1:{port}")),
+        "首连记录指纹: {recorded}"
+    );
 
     // 同 sshd 重连（指纹一致）通过
     connect_with("127.0.0.1", port, "tester", &auth, &kh).await?;
@@ -280,29 +315,39 @@ async fn 本地流_轮转截断后送达新内容() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join(format!("logtail-rot-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("app.log");
-    std::fs::write(&path, "old-a
+    std::fs::write(
+        &path,
+        "old-a
 old-b
-")?;
+",
+    )?;
     let (mut sess, _jh) = ActiveSession::spawn_local_file(path.to_string_lossy().into_owned(), 5);
 
     // 排空首批（old-a/old-b）
     for _ in 0..50 {
         match sess.rx.try_recv() {
             Ok(StreamEvent::Lines(_)) => {}
-            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
             _ => break,
         }
     }
 
     // copytruncate：清空重写
-    std::fs::write(&path, "new-1
+    std::fs::write(
+        &path,
+        "new-1
 new-2
-")?;
+",
+    )?;
     let mut got = Vec::new();
     for _ in 0..100 {
         match sess.rx.try_recv() {
             Ok(StreamEvent::Lines(ls)) => got.extend(ls),
-            Err(TryRecvError::Empty) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await
+            }
             _ => break,
         }
         if got.contains(&"new-1".to_string()) {

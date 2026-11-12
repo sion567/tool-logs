@@ -2,8 +2,8 @@
 
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 
-use crate::log::LogLine;
 use crate::log::LogLevel;
+use crate::log::LogLine;
 use crate::source::SourceType;
 
 /// [v0.3 P2#11] 大小写不敏感；"ERROR" 不含 "WARN"，顺序判断无歧义
@@ -34,7 +34,10 @@ pub fn detect_level(text: &str) -> LogLevel {
 
 /// 一行 → LogLine（§5.4）。只解析一次；包壳 time 作为首选，正文 RFC3339 仅兜底。
 pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
-    let mut line = LogLine { raw, ..Default::default() };
+    let mut line = LogLine {
+        raw,
+        ..Default::default()
+    };
 
     let dj_time = if src_type == SourceType::Docker {
         match parse_docker_json(&line.raw) {
@@ -56,6 +59,32 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
     line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
+}
+
+/// [v0.10.5] docker JSON 拆壳后的消息可能内嵌真实 \n（一条记录打印多行内容，
+/// 如 pretty JSON / 异常栈）——按行拆成多条 LogLine：每条独立识别级别/抽 trace，
+/// 子行继承记录时间戳（时间轴与排序不丢行）。无内嵌换行时返回单条，等价
+/// parse_line（各源 stream 层已按 \n 分行；此处兜底，防上游拆行遗漏）。
+pub fn parse_line_multi(raw: String, src_type: SourceType) -> Vec<LogLine> {
+    let head = parse_line(raw, src_type);
+    if !head.raw.contains('\n') {
+        return vec![head];
+    }
+    head.raw
+        .split('\n')
+        .map(|s| {
+            let s = s.trim_end_matches('\r');
+            let mut l = LogLine {
+                raw: s.to_string(),
+                ..Default::default()
+            };
+            l.body = strip_ts_prefix(s).to_string();
+            l.level = detect_level(s);
+            l.timestamp = head.timestamp.or_else(|| extract_timestamp(s));
+            l.trace_id = extract_trace_id(s);
+            l
+        })
+        .collect()
 }
 
 /// [v0.10] 消息体提取：剥掉行首的时间戳 token（RFC3339 / docker --timestamps /
@@ -151,9 +180,16 @@ mod tests {
             detect_level("2026-11-07T02:34:26.251509351Z java.io.IOException: SFTP connection failed: 192.168.40.241:22"),
             LogLevel::Error
         );
-        assert_eq!(detect_level("Traceback (most recent call last):"), LogLevel::Error);
+        assert_eq!(
+            detect_level("Traceback (most recent call last):"),
+            LogLevel::Error
+        );
         assert_eq!(detect_level("SEVERE: null pointer"), LogLevel::Error);
-        assert_eq!(detect_level("deprecation warning about config"), LogLevel::Warn, "warn 优先级不变");
+        assert_eq!(
+            detect_level("deprecation warning about config"),
+            LogLevel::Warn,
+            "warn 优先级不变"
+        );
     }
 
     #[test]
@@ -173,18 +209,68 @@ mod tests {
     }
 
     #[test]
+    fn docker多行记录_拆成多条_子行继承时间戳() {
+        // [v0.10.5] 一条 docker 记录打印多行内容：拆壳后内嵌 \n 拆成独立日志行，
+        // 子行继承记录时间戳、各自识别级别；单行记录不受影响
+        let raw = concat!(
+            r#"{"log":"{\"id\":-1,\"xxx\":\"v\"}\n"#,
+            r#"ERROR 崩了\n"#,
+            r#"at java.foo(Bar.java:1)\n","#,
+            r#""stream":"stdout","time":"2026-01-05T14:02:04.123+08:00"}"#
+        );
+        let lines = parse_line_multi(raw.into(), SourceType::Docker);
+        assert_eq!(lines.len(), 3, "内嵌两个 \\n → 3 条");
+        assert_eq!(lines[0].raw, r#"{"id":-1,"xxx":"v"}"#);
+        assert_eq!(lines[1].raw, "ERROR 崩了");
+        assert_eq!(lines[2].raw, "at java.foo(Bar.java:1)");
+        let ts = lines[0].timestamp.expect("记录时间戳");
+        assert!(
+            lines[1..].iter().all(|l| l.timestamp == Some(ts)),
+            "子行继承时间戳"
+        );
+        assert_eq!(lines[1].level, LogLevel::Error, "子行独立识别级别");
+        assert_eq!(lines[0].level, LogLevel::Unknown, "无关键字取缺省");
+        // 单行 / 非 docker 路径与 parse_line 等价
+        let single = parse_line_multi(
+            r#"{"log":"one line\n","stream":"stdout","time":"2026-01-05T14:02:04.123+08:00"}"#
+                .into(),
+            SourceType::Docker,
+        );
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].raw, "one line");
+        let plain = parse_line_multi("a\nb".into(), SourceType::File);
+        assert_eq!(
+            plain.len(),
+            2,
+            "防御性：非 docker 源混入多行也拆（stream 层本已分行）"
+        );
+    }
+
+    #[test]
     fn 正文时间戳_兜底提取() {
-        let line = parse_line("2026-01-05 14:02:04 something fatal happened".into(), SourceType::File);
+        let line = parse_line(
+            "2026-01-05 14:02:04 something fatal happened".into(),
+            SourceType::File,
+        );
         assert!(line.timestamp.is_some());
         assert_eq!(line.level, LogLevel::Error);
     }
 
     #[test]
     fn trace_id_抽取() {
-        let l = parse_line("req trace_id=9f8e7d6c5b4a3212 done".into(), SourceType::File);
+        let l = parse_line(
+            "req trace_id=9f8e7d6c5b4a3212 done".into(),
+            SourceType::File,
+        );
         assert_eq!(l.trace_id.as_deref(), Some("9f8e7d6c5b4a3212"));
-        let l2 = parse_line("TraceId: 550e8400-e29b-41d4-a716-446655440000".into(), SourceType::File);
-        assert_eq!(l2.trace_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        let l2 = parse_line(
+            "TraceId: 550e8400-e29b-41d4-a716-446655440000".into(),
+            SourceType::File,
+        );
+        assert_eq!(
+            l2.trace_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         let l3 = parse_line("no trace here".into(), SourceType::File);
         assert!(l3.trace_id.is_none());
     }
@@ -192,17 +278,29 @@ mod tests {
     #[test]
     fn 消息体提取_剥时间戳前缀() {
         // [v0.10] 相似行折叠的去重键：四种时间戳形态都能剥掉
-        assert_eq!(strip_ts_prefix("2026-11-05T00:16:25.073Z aio.zdhr create"), "aio.zdhr create");
+        assert_eq!(
+            strip_ts_prefix("2026-11-05T00:16:25.073Z aio.zdhr create"),
+            "aio.zdhr create"
+        );
         assert_eq!(strip_ts_prefix("2026-01-05 14:02:04 db error"), "db error");
-        assert_eq!(strip_ts_prefix("11月 04 06:56:00 sshd: closed"), "sshd: closed");
-        assert_eq!(strip_ts_prefix("Nov  4 06:56:00 sshd: closed"), "sshd: closed");
+        assert_eq!(
+            strip_ts_prefix("11月 04 06:56:00 sshd: closed"),
+            "sshd: closed"
+        );
+        assert_eq!(
+            strip_ts_prefix("Nov  4 06:56:00 sshd: closed"),
+            "sshd: closed"
+        );
         assert_eq!(strip_ts_prefix("no timestamp here"), "no timestamp here");
     }
 
     #[test]
     fn ansi_转义剥除() {
         // §19 限制①：远端自带颜色码不能按字面进 ratatui
-        let l = parse_line("\x1b[31mERROR\x1b[0m db connection refused".into(), SourceType::File);
+        let l = parse_line(
+            "\x1b[31mERROR\x1b[0m db connection refused".into(),
+            SourceType::File,
+        );
         assert_eq!(l.raw, "ERROR db connection refused");
         assert_eq!(l.level, LogLevel::Error);
         // OSC 序列（窗口标题类）

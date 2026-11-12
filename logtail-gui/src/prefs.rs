@@ -14,8 +14,6 @@ const RECENT_MAX: usize = 10;
 pub struct Prefs {
     /// 日志正文字号（也是行高基准）
     pub font_size: f32,
-    /// 长行自动换行（false = 截断，与 TUI wrap_long_lines 同义）
-    pub wrap: bool,
     /// 每个 tab 的行数上限（LogBuffer 容量）
     pub max_lines: usize,
     /// 窗口置顶（BareTail always-on-top）
@@ -36,11 +34,14 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             font_size: 14.0,
-            wrap: false,
             max_lines: 10_000,
             always_on_top: false,
             recent_files: Vec::new(),
-            window: WindowPrefs { w: 1280.0, h: 800.0, maximized: false },
+            window: WindowPrefs {
+                w: 1280.0,
+                h: 800.0,
+                maximized: false,
+            },
         }
     }
 }
@@ -93,11 +94,14 @@ mod tests {
     fn 往返_字段不丢() {
         let p = Prefs {
             font_size: 16.5,
-            wrap: true,
             max_lines: 2000,
             always_on_top: true,
             recent_files: vec!["C:/logs/a.log".into(), "D:/b.out".into()],
-            window: WindowPrefs { w: 800.0, h: 600.0, maximized: true },
+            window: WindowPrefs {
+                w: 800.0,
+                h: 600.0,
+                maximized: true,
+            },
         };
         let text = to_toml(&p).unwrap();
         let back = from_toml(&text).unwrap();
@@ -121,9 +125,17 @@ mod tests {
             p.push_recent(&format!("f{i}.log"));
         }
         assert_eq!(p.recent_files.len(), RECENT_MAX);
-        assert_eq!(p.recent_files[0], format!("f{}.log", RECENT_MAX + 2), "最新在最前");
+        assert_eq!(
+            p.recent_files[0],
+            format!("f{}.log", RECENT_MAX + 2),
+            "最新在最前"
+        );
         p.push_recent("f3.log");
         assert_eq!(p.recent_files[0], "f3.log", "重复打开置顶");
-        assert_eq!(p.recent_files.iter().filter(|s| **s == "f3.log").count(), 1, "去重");
+        assert_eq!(
+            p.recent_files.iter().filter(|s| **s == "f3.log").count(),
+            1,
+            "去重"
+        );
     }
 }

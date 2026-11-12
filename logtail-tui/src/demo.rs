@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use logtail_core::config::server::AuthCfg;
-use logtail_core::log::{colorize, parse_line, LogBuffer};
+use logtail_core::log::{colorize, parse_line_multi, LogBuffer};
 use logtail_core::source::SourceType;
 use logtail_core::ssh::{connect, LogStream, StreamEvent};
 
@@ -48,7 +48,9 @@ pub async fn run() -> Result<()> {
             // [v0.4 P0#2] 整批 parse+push，不丢行
             Some(StreamEvent::Lines(lines)) => {
                 for raw in lines {
-                    buffer.push(parse_line(raw, src_type));
+                    for line in parse_line_multi(raw, src_type) {
+                        buffer.push(line);
+                    }
                 }
                 println!("[2J[H");
                 for line in buffer.tail(40) {
@@ -68,15 +70,19 @@ pub async fn run() -> Result<()> {
 
 /// 本地文件冒烟：tail 语义打印
 async fn local_tail(path: &str, tail: usize) -> Result<()> {
-    let (mut sess, _jh) = logtail_core::ssh::session::ActiveSession::spawn_local_file(path.into(), tail);
+    let (mut sess, _jh) =
+        logtail_core::ssh::session::ActiveSession::spawn_local_file(path.into(), tail);
     loop {
         match sess.rx.try_recv() {
             Ok(StreamEvent::Lines(lines)) => {
                 for l in lines {
-                    println!("{}", colorize(&logtail_core::log::LogLine {
-                        raw: l,
-                        ..Default::default()
-                    }));
+                    println!(
+                        "{}",
+                        colorize(&logtail_core::log::LogLine {
+                            raw: l,
+                            ..Default::default()
+                        })
+                    );
                 }
             }
             Ok(StreamEvent::Ended) => {

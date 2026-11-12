@@ -1,7 +1,7 @@
 # logtail 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
-> 当前版本：v0.10.4（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
+> 当前版本：v0.10.5（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
 
 ---
 
@@ -26,7 +26,7 @@
 git clone <仓库地址> && cd logtail
 cargo build --release
 # 二进制在 target/release/logtail-tui
-./target/release/logtail-tui --version   # logtail-tui v0.10.4
+./target/release/logtail-tui --version   # logtail-tui v0.10.5
 ```
 
 ### 方式二：直接用已构建的二进制
@@ -84,8 +84,7 @@ name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
 
-[ui]                          # UI 显示设置（v0.9；热键 w/b/v/h 切换，退出自动记住）
-wrap_long_lines = false       # 长行自动换行（true=折行看全文；false=截断+←→ 横滚）
+[ui]                          # UI 显示设置（v0.9；热键 b/v/h 切换，退出自动记住）
 show_sparkline = true         # 日志量时间轴
 show_sidebar = true           # 侧栏（隐藏后日志区全宽，b 键切回）
 show_hints = true             # 状态栏键位提示
@@ -205,6 +204,8 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 | `p` | 聚焦源提示（同屏分屏规划中） |
 | `q` / `Esc` | 关闭面板 |
 | **其它按键照常** | 面板开着 `↑↓` 换选中行（面板跟随刷新）、`R` 重连、`/` 过滤、`,`/`.` 切 tab 都可用（v0.7.5）；上下文 ±5 全部可见（面板加高，v0.7.6） |
+
+> 长行在面板内**自动折行显示全文**（v0.10.5）——主日志区固定单行（截断 + `←→` 横滚），看不完的内容进详情面板；docker 多行记录（一条记录打印多行内容）已拆成独立日志行，逐行进详情面板。
 
 ### 工具
 

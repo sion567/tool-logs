@@ -43,13 +43,10 @@ pub fn known_hosts_path() -> std::path::PathBuf {
 
 /// 已知主机条目：`host:port fingerprint`
 fn read_known_host(path: &std::path::Path, ident: &str) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .lines()
-        .find_map(|l| {
-            let (id, fp) = l.split_once(' ')?;
-            (id == ident).then(|| fp.to_string())
-        })
+    std::fs::read_to_string(path).ok()?.lines().find_map(|l| {
+        let (id, fp) = l.split_once(' ')?;
+        (id == ident).then(|| fp.to_string())
+    })
 }
 
 fn append_known_host(path: &std::path::Path, ident: &str, fp: &str) -> Result<()> {
@@ -57,7 +54,10 @@ fn append_known_host(path: &std::path::Path, ident: &str, fp: &str) -> Result<()
         std::fs::create_dir_all(dir)?;
     }
     use std::io::Write as _;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(f, "{ident} {fp}")?;
     Ok(())
 }
@@ -79,9 +79,15 @@ pub async fn connect_with(
     let found = Arc::new(Mutex::new(None::<String>));
 
     let config = Arc::new(client::Config::default());
-    let mut handle = client::connect(config, (host, port), ClientHandler { found: found.clone() })
-        .await
-        .map_err(|e| LogtailError::SshConnect(format!("{host}:{port}: {e}")))?;
+    let mut handle = client::connect(
+        config,
+        (host, port),
+        ClientHandler {
+            found: found.clone(),
+        },
+    )
+    .await
+    .map_err(|e| LogtailError::SshConnect(format!("{host}:{port}: {e}")))?;
 
     let fp = found
         .lock()

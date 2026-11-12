@@ -1,6 +1,6 @@
 [package]
 name = "logtail-gui"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "BareTail 风格的图形界面日志查看器（本地文件 + 远程源），复用 logtail-core 核心库"
 
@@ -15,4 +15,4 @@ regex = "1"
 # Windows 上配置 wgpu 后端白名单（禁 Vulkan）用
 egui-wgpu = "0.37"
 # 复用 logtail-core 的本地 tail 泵（轮转自愈）/ 行解析 / 过滤 / SSH 连接
-logtail-core = { version = "0.10.3", path = "../logtail-core" }
+logtail-core = { version = "0.10.4", path = "../logtail-core" }

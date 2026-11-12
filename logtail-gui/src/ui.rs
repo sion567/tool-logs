@@ -13,14 +13,14 @@ use eframe::egui::{
     WindowLevel,
 };
 
-use logtail_core::log::export_session;
 use logtail_core::config::{Config, SourceConfig};
+use logtail_core::log::export_session;
 use logtail_core::log::filter::LevelFilter;
 use logtail_core::ssh::StreamEvent;
 
-use crate::pump::{Pump, PumpCmd};
-use crate::tab::{level_color, raw_hits, SessionState, Tab, TabKind};
 use crate::prefs::Prefs;
+use crate::pump::{Pump, PumpCmd};
+use crate::tab::{SessionState, Tab, TabKind, level_color, raw_hits};
 
 /// 日志区底色（BareTail 白底）
 const LOG_BG: Color32 = Color32::WHITE;
@@ -31,6 +31,14 @@ const SEL_BG: Color32 = Color32::from_rgb(204, 228, 255);
 /// 状态/告警色（浅底可读）
 const WARN_FG: Color32 = Color32::from_rgb(176, 106, 0);
 const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
+/// [v0.1.6] 行详情条底色（浅灰，与日志区区分）
+const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
+/// [v0.1.6] 详情条次要信息（时间/源）颜色
+const DETAIL_MUTED: Color32 = Color32::from_rgb(110, 110, 110);
+/// [v0.1.6] trace_id 色
+const TRACE_FG: Color32 = Color32::from_rgb(0, 120, 160);
+/// [v0.1.6] 行详情条总高（头部 1-2 行 + 折行全文滚动区）
+const DETAIL_BAR_H: f32 = 150.0;
 
 pub struct LogTailApp {
     pub prefs: Prefs,
@@ -94,7 +102,8 @@ impl LogTailApp {
                             self.status = format!("{}：{}（按「重连」再试）", t.title, msg);
                         } else if t.total_pushed == 0 {
                             t.state = SessionState::Failed;
-                            self.status = format!("{}：连接失败（无数据），按「重连」再试", t.title);
+                            self.status =
+                                format!("{}：连接失败（无数据），按「重连」再试", t.title);
                         } else {
                             t.state = SessionState::Ended;
                             t.follow = false;
@@ -124,12 +133,14 @@ impl LogTailApp {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.tabs.push(Tab::new_local(id, &path, self.prefs.max_lines));
+        self.tabs
+            .push(Tab::new_local(id, &path, self.prefs.max_lines));
         self.active = self.tabs.len() - 1;
-        let _ = self
-            .pump
-            .cmd_tx
-            .send(PumpCmd::OpenLocal { id, path: path.clone(), tail: self.prefs.max_lines });
+        let _ = self.pump.cmd_tx.send(PumpCmd::OpenLocal {
+            id,
+            path: path.clone(),
+            tail: self.prefs.max_lines,
+        });
         self.prefs.push_recent(&path);
         self.prefs_dirty = true;
         self.status = format!("已打开 {path}");
@@ -192,7 +203,9 @@ impl LogTailApp {
     }
 
     fn reconnect_active(&mut self) {
-        let Some(ti) = self.active_tab_idx() else { return };
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
         let Some(rc) = (match &self.tabs[ti].kind {
             TabKind::Remote(r) => Some(crate::pump::RemoteConnect {
                 id: self.tabs[ti].id,
@@ -213,8 +226,13 @@ impl LogTailApp {
     }
 
     fn export_active(&mut self) {
-        let Some(ti) = self.active_tab_idx() else { return };
-        let Some(dir) = rfd::FileDialog::new().set_title("选择导出目录").pick_folder() else {
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        let Some(dir) = rfd::FileDialog::new()
+            .set_title("选择导出目录")
+            .pick_folder()
+        else {
             return;
         };
         let t = &self.tabs[ti];
@@ -253,7 +271,9 @@ impl LogTailApp {
         }
         let copy = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::C));
         if copy {
-            let Some(ti) = self.active_tab_idx() else { return };
+            let Some(ti) = self.active_tab_idx() else {
+                return;
+            };
             let (text, ranged) = {
                 let t = &self.tabs[ti];
                 (t.copy_text(), t.sel_focus.is_some())
@@ -273,7 +293,9 @@ impl LogTailApp {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for f in dropped {
             // egui 0.37：DroppedFile 是 trait，句柄是 Arc<dyn DroppedFile>
-            let Some(path) = f.path().to_str().map(|s| s.to_string()) else { continue };
+            let Some(path) = f.path().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
             self.open_local(&path);
         }
     }
@@ -384,7 +406,10 @@ impl LogTailApp {
                 }
                 // 激活源的详细信息（BareTail：文件身份跟在标签区）
                 let Some(ti) = self.active_tab_idx() else {
-                    ui.label(RichText::new("（没有打开的日志——拖入 .log 文件或「＋ 打开文件…」）").weak());
+                    ui.label(
+                        RichText::new("（没有打开的日志——拖入 .log 文件或「＋ 打开文件…」）")
+                            .weak(),
+                    );
                     return;
                 };
                 let detail = {
@@ -418,7 +443,9 @@ impl LogTailApp {
                     self.show_connect = true;
                 }
                 ui.separator();
-                let Some(ti) = self.active_tab_idx() else { return };
+                let Some(ti) = self.active_tab_idx() else {
+                    return;
+                };
                 // 跟随 / 末尾
                 let mut follow = self.tabs[ti].follow;
                 if ui.checkbox(&mut follow, "跟随").changed() {
@@ -472,10 +499,7 @@ impl LogTailApp {
                 }
                 ui.separator();
 
-                // 显示设置（全局）
-                if ui.checkbox(&mut self.prefs.wrap, "换行").changed() {
-                    self.prefs_dirty = true;
-                }
+                // 显示设置（全局）；[v0.1.6] 换行勾选撤销——主视图固定单行，长行双击/右键看详情条
                 if ui.small_button("A−").clicked() {
                     self.prefs.font_size = (self.prefs.font_size - 1.0).max(9.0);
                     self.prefs_dirty = true;
@@ -490,7 +514,8 @@ impl LogTailApp {
                     } else {
                         WindowLevel::Normal
                     };
-                    ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(level));
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::WindowLevel(level));
                     self.prefs_dirty = true;
                 }
                 ui.separator();
@@ -527,38 +552,24 @@ impl LogTailApp {
 
             // 行间零缝隙
             ui.spacing_mut().item_spacing.y = 0.0;
-            let (row_h, line_h, font_size, wrap, follow, jump, prev_inner_h, prev_inner_w) = {
+            let (row_h, font_size, follow, jump, prev_inner_h) = {
                 let tab = &mut self.tabs[ti];
                 tab.ensure_view();
                 let fs = self.prefs.font_size;
-                (
-                    fs * 1.5,
-                    fs * 1.45,
-                    fs,
-                    self.prefs.wrap,
-                    tab.follow,
-                    tab.jump_to_end,
-                    tab.last_inner_h,
-                    tab.last_inner_w,
-                )
+                (fs * 1.5, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
             };
             let fm = self.tabs[ti].active_filter();
-
-            // mono 字符宽（每帧测一次；变高行按「显示列数」估折行数）
-            let char_w = (ui
-                .painter()
-                .layout_no_wrap("wwwwwwww".into(), egui::FontId::monospace(font_size), LOG_BG)
-                .size().x
-                / 8.0)
-                .max(1.0);
-            let est_w = if prev_inner_w > 10.0 { prev_inner_w } else { 800.0 };
-            {
-                let tab = &mut self.tabs[ti];
-                tab.ensure_layout(est_w, font_size, wrap, line_h, char_w, row_h);
-            }
-            let total = self.tabs[ti].layout.total;
+            let n = self.tabs[ti].view.len();
+            // [v0.1.6] 行详情条（开时占底部一块，日志区让位）；行高恒定 → 总高 = n×row_h
+            let bar_h = if self.tabs[ti].detail_line.is_some() {
+                DETAIL_BAR_H
+            } else {
+                0.0
+            };
+            let avail = ui.available_rect_before_wrap();
+            let log_h = (avail.height() - bar_h).max(60.0);
             // 精确跳底落点：content 总高 - 视口高
-            let jump_offset = (total - prev_inner_h).max(0.0);
+            let jump_offset = (n as f32 * row_h - prev_inner_h).max(0.0);
 
             let mut copy_line: Option<String> = None;
             let mut filter_trace: Option<String> = None;
@@ -572,117 +583,109 @@ impl LogTailApp {
                 sa = sa.vertical_scroll_offset(jump_offset);
             }
             let tab = &mut self.tabs[ti];
-            let out = sa.show_viewport(ui, |ui, viewport| {
-                // viewport = 可见窗口（内容坐标）；按行高前缀和定位可见行——
-                // 变高行（wrap 折行后行高变大，下方内容自然下移），show_rows 做不了
-                ui.set_height(total);
-                let band = ui.max_rect();
-                let n = tab.view.len();
-                if n == 0 {
-                    return;
-                }
-                // 首个底边越过视口顶的行
-                let mut i = tab.layout.prefix[1..].partition_point(|&v| v <= viewport.min.y);
-                while i < n {
-                    let top = tab.layout.prefix[i];
-                    if top >= viewport.max.y {
-                        break;
-                    }
-                    let h = (tab.layout.prefix[i + 1] - top).max(1.0);
-                    let no = tab.view[i];
-                    let Some((raw, level, ts, trace)) = tab.buffer.by_line_no(no).map(|l| {
-                        (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone())
-                    }) else {
-                        i += 1;
-                        continue;
-                    };
-                    let hit = raw_hits(&raw, fm.as_ref());
-                    let selected = tab.selected == Some(no);
-                    let rect = egui::Rect::from_min_size(
-                        egui::pos2(band.left(), band.top() + top),
-                        egui::vec2(band.width(), h),
-                    );
+            // [v0.1.6] 行高恒定 → show_rows 虚拟化（变高行前缀和机制随主视图撤换行而删除）；
+            // 日志区 = 可用高 - 详情条高
+            let out = ui
+                .allocate_ui(egui::vec2(avail.width(), log_h), |ui| {
+                    sa.show_rows(ui, row_h, n, |ui, rows| {
+                        for i in rows {
+                            let Some(&no) = tab.view.get(i) else { continue };
+                            let Some((raw, level, ts, trace)) = tab
+                                .buffer
+                                .by_line_no(no)
+                                .map(|l| (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone()))
+                            else {
+                                continue;
+                            };
+                            let hit = raw_hits(&raw, fm.as_ref());
+                            let selected = tab.selected == Some(no);
+                            let rect = egui::Rect::from_min_size(
+                                ui.cursor().left_top(),
+                                egui::vec2(ui.available_width(), row_h),
+                            );
 
-                    let bg = if selected {
-                        SEL_BG
-                    } else if hit {
-                        HIT_BG
-                    } else {
-                        LOG_BG
-                    };
-                    ui.painter().rect_filled(rect, 0.0, bg);
+                            let bg = if selected {
+                                SEL_BG
+                            } else if hit {
+                                HIT_BG
+                            } else {
+                                LOG_BG
+                            };
+                            ui.painter().rect_filled(rect, 0.0, bg);
 
-                    let color = level_color(level);
-                    // wrap 开 = 按带宽折行；关 = 单行（超出部分由行带裁剪）
-                    let galley = if wrap {
-                        ui.painter().layout(
-                            raw.clone(),
-                            egui::FontId::monospace(font_size),
-                            color,
-                            rect.width(),
-                        )
-                    } else {
-                        ui.painter()
-                            .layout_no_wrap(raw.clone(), egui::FontId::monospace(font_size), color)
-                    };
-                    ui.painter()
-                        .with_clip_rect(rect)
-                        .galley(egui::pos2(rect.left() + 3.0, rect.top() + 2.0), galley, color);
+                            let color = level_color(level);
+                            // [v0.1.6] 主视图固定单行（layout_no_wrap）：超出由 ScrollArea 裁剪，长行全文看详情条
+                            let galley = ui.painter().layout_no_wrap(
+                                raw.clone(),
+                                egui::FontId::monospace(font_size),
+                                color,
+                            );
+                            ui.painter().galley(
+                                egui::pos2(rect.left() + 3.0, rect.top() + 2.0),
+                                galley,
+                                color,
+                            );
 
-                    let resp = ui.interact(rect, egui::Id::unique(("row", id, no)), Sense::click());
-                    // 单击=选起点；Shift+单击=把已选行扩成区间（v0.1.3 多行复制）
-                    if resp.clicked() {
-                        let shift = ui.input(|i| i.modifiers.shift);
-                        if shift && tab.selected.is_some() {
-                            tab.sel_focus = Some(no);
-                        } else {
-                            tab.selected = Some(no);
-                            tab.sel_focus = None;
-                        }
-                    }
-                    resp.context_menu(|ui| {
-                        if ui.button("复制该行").clicked() {
-                            copy_line = Some(raw.clone());
-                            ui.close();
-                        }
-                        let n = tab.range_count().unwrap_or(1);
-                        if n > 1 && ui.button(format!("复制选中 {n} 行")).clicked() {
-                            if let Some(text) = tab.copy_text() {
-                                copy_line = Some(text);
+                            let resp = ui.allocate_rect(rect, Sense::click());
+                            // 单击=选起点；Shift+单击=扩成区间；双击=打开行详情条
+                            if resp.double_clicked() {
+                                tab.detail_line = Some(no);
                             }
-                            ui.close();
+                            if resp.clicked() {
+                                let shift = ui.input(|i| i.modifiers.shift);
+                                if shift && tab.selected.is_some() {
+                                    tab.sel_focus = Some(no);
+                                } else {
+                                    tab.selected = Some(no);
+                                    tab.sel_focus = None;
+                                }
+                            }
+                            resp.context_menu(|ui| {
+                                if ui.button("查看完整行").clicked() {
+                                    tab.detail_line = Some(no);
+                                    ui.close();
+                                }
+                                if ui.button("复制该行").clicked() {
+                                    copy_line = Some(raw.clone());
+                                    ui.close();
+                                }
+                                let n = tab.range_count().unwrap_or(1);
+                                if n > 1 && ui.button(format!("复制选中 {n} 行")).clicked() {
+                                    if let Some(text) = tab.copy_text() {
+                                        copy_line = Some(text);
+                                    }
+                                    ui.close();
+                                }
+                                if let Some(ts) = ts
+                                    && ui.button("复制时间戳").clicked()
+                                {
+                                    copy_line = Some(ts.to_rfc3339());
+                                    ui.close();
+                                }
+                                if let Some(tid) = &trace
+                                    && ui.button("复制 trace_id").clicked()
+                                {
+                                    copy_line = Some(tid.clone());
+                                    ui.close();
+                                }
+                                if let Some(tid) = &trace
+                                    && ui.button("按 trace_id 过滤").clicked()
+                                {
+                                    filter_trace = Some(tid.clone());
+                                    ui.close();
+                                }
+                            });
                         }
-                        if let Some(ts) = ts
-                            && ui.button("复制时间戳").clicked()
-                        {
-                            copy_line = Some(ts.to_rfc3339());
-                            ui.close();
-                        }
-                        if let Some(tid) = &trace
-                            && ui.button("复制 trace_id").clicked()
-                        {
-                            copy_line = Some(tid.clone());
-                            ui.close();
-                        }
-                        if let Some(tid) = &trace
-                            && ui.button("按 trace_id 过滤").clicked()
-                        {
-                            filter_trace = Some(tid.clone());
-                            ui.close();
-                        }
-                    });
-                    i += 1;
-                }
-            });
+                    })
+                })
+                .inner;
 
             // ---- 跟随状态机 ----
             let inner_h = out.inner_rect.height();
-            let inner_w = out.inner_rect.width();
             let max_off = (out.content_size.y - inner_h).max(0.0);
             let at_bottom = out.state.clamped_offset().y >= max_off - 2.0;
             let tab = &mut self.tabs[ti];
             tab.last_inner_h = inner_h;
-            tab.last_inner_w = inner_w;
             if let Some(text) = copy_line {
                 ui.ctx().copy_text(text);
                 self.status = "已复制".into();
@@ -702,6 +705,65 @@ impl LogTailApp {
             }
             if jump && at_bottom {
                 tab.jump_to_end = false; // 到位即收；未到位（新行涌入/尺寸变化）下一帧按新参数重试
+            }
+
+            // ---- 行详情条（v0.1.6）：双击行/右键打开，egui 真实像素折行，长行全文可读 ----
+            if let Some(no) = self.tabs[ti].detail_line {
+                let line = self.tabs[ti].buffer.by_line_no(no).map(|l| {
+                    (
+                        l.raw.clone(),
+                        l.level,
+                        l.timestamp,
+                        l.source.clone(),
+                        l.trace_id.clone(),
+                    )
+                });
+                ui.allocate_ui(egui::vec2(avail.width(), bar_h), |ui| {
+                    ui.painter().rect_filled(ui.max_rect(), 0.0, DETAIL_BG);
+                    let Some((raw, level, ts, source, trace)) = line else {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(ERR_FG, "该行已被缓冲窗口淘汰");
+                            if ui.small_button("关闭").clicked() {
+                                self.tabs[ti].detail_line = None;
+                            }
+                        });
+                        return;
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("详情").strong());
+                        if let Some(t) = ts {
+                            ui.label(RichText::new(t.to_rfc3339()).color(DETAIL_MUTED));
+                        }
+                        ui.label(RichText::new(level.label()).color(level_color(level)));
+                        if !source.is_empty() {
+                            ui.label(RichText::new(source).color(DETAIL_MUTED));
+                        }
+                        if let Some(tid) = &trace {
+                            ui.label(RichText::new(format!("trace: {tid}")).color(TRACE_FG));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("关闭").clicked() {
+                                self.tabs[ti].detail_line = None;
+                            }
+                            if ui.small_button("复制该行").clicked() {
+                                ui.ctx().copy_text(raw.clone());
+                                self.status = "已复制".into();
+                            }
+                        });
+                    });
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height((bar_h - 64.0).max(40.0))
+                        .id_salt(("detailbar", self.tabs[ti].id))
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&raw).monospace().color(level_color(level)),
+                                )
+                                .wrap(),
+                            );
+                        });
+                });
             }
         });
     }
@@ -792,49 +854,55 @@ impl LogTailApp {
                     ui.label("config.toml 里没有 [[sources]]。");
                     ui.label(format!(
                         "编辑 {} 添加服务器与源后重开本窗口。",
-                        logtail_core::config::config_dir().join("config.toml").display()
+                        logtail_core::config::config_dir()
+                            .join("config.toml")
+                            .display()
                     ));
                     return;
                 }
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    for sc in &cfg.sources {
-                        let srv = cfg.servers.iter().find(|s| s.name == sc.server);
-                        let ty = match &sc.source {
-                            logtail_core::source::LogSource::Docker { .. } => "docker",
-                            logtail_core::source::LogSource::File { .. } => "file",
-                            logtail_core::source::LogSource::Journalctl { .. } => "journalctl",
-                            logtail_core::source::LogSource::Command { .. } => "command",
-                            logtail_core::source::LogSource::Loki { .. } => "loki",
-                            logtail_core::source::LogSource::LocalFile { .. } => "本地",
-                        };
-                        ui.horizontal(|ui| {
-                            let valid = srv.is_some();
-                            let btn = egui::Button::new("连接").small();
-                            if ui
-                                .add_enabled(valid, btn)
-                                .on_disabled_hover_text("引用的服务器不存在")
-                                .clicked()
-                            {
-                                picked = Some(sc.clone());
-                            }
-                            match srv {
-                                Some(s) => {
-                                    ui.label(format!(
-                                        "{}  →  {}@{}:{}  [{ty}]",
-                                        sc.name, s.user, s.host, s.port
-                                    ));
-                                }
-                                None => {
-                                    ui.label(RichText::new(format!(
-                                        "{}  ⚠ 服务器 \"{}\" 不存在  [{ty}]",
-                                        sc.name, sc.server
-                                    ))
-                                    .color(ERR_FG));
-                                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for sc in &cfg.sources {
+                            let srv = cfg.servers.iter().find(|s| s.name == sc.server);
+                            let ty = match &sc.source {
+                                logtail_core::source::LogSource::Docker { .. } => "docker",
+                                logtail_core::source::LogSource::File { .. } => "file",
+                                logtail_core::source::LogSource::Journalctl { .. } => "journalctl",
+                                logtail_core::source::LogSource::Command { .. } => "command",
+                                logtail_core::source::LogSource::Loki { .. } => "loki",
+                                logtail_core::source::LogSource::LocalFile { .. } => "本地",
                             };
-                        });
-                    }
-                });
+                            ui.horizontal(|ui| {
+                                let valid = srv.is_some();
+                                let btn = egui::Button::new("连接").small();
+                                if ui
+                                    .add_enabled(valid, btn)
+                                    .on_disabled_hover_text("引用的服务器不存在")
+                                    .clicked()
+                                {
+                                    picked = Some(sc.clone());
+                                }
+                                match srv {
+                                    Some(s) => {
+                                        ui.label(format!(
+                                            "{}  →  {}@{}:{}  [{ty}]",
+                                            sc.name, s.user, s.host, s.port
+                                        ));
+                                    }
+                                    None => {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{}  ⚠ 服务器 \"{}\" 不存在  [{ty}]",
+                                                sc.name, sc.server
+                                            ))
+                                            .color(ERR_FG),
+                                        );
+                                    }
+                                };
+                            });
+                        }
+                    });
             });
         if let Some(sc) = picked {
             self.open_remote(&sc);

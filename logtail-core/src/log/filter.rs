@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::log::LogLine;
 use crate::log::LogLevel;
+use crate::log::LogLine;
 
 /// [v0.3 P0#1] Arc<Regex> 实现 Clone（原子引用计数浅拷贝），整个枚举可 derive(Clone)。
 /// PartialEq 手写：regex::Regex 未实现 PartialEq，按原始串比较（Arc 指针比较不够表达）。
@@ -121,7 +121,11 @@ mod tests {
     use crate::log::LogBuffer;
 
     fn line(level: LogLevel, raw: &str) -> LogLine {
-        LogLine { level, raw: raw.into(), ..Default::default() }
+        LogLine {
+            level,
+            raw: raw.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -148,7 +152,10 @@ mod tests {
         let l = line(LogLevel::Info, "connection refused by db");
         assert!(matches_filter(&l, &FilterMode::Text("refused".into())));
         assert!(!matches_filter(&l, &FilterMode::Text("timeout".into())));
-        let re = FilterMode::Regex(Arc::new(regex::Regex::new("refus.*d").unwrap()), "refus.*d".into());
+        let re = FilterMode::Regex(
+            Arc::new(regex::Regex::new("refus.*d").unwrap()),
+            "refus.*d".into(),
+        );
         assert!(matches_filter(&l, &re));
     }
 
@@ -167,9 +174,18 @@ mod tests {
     #[test]
     fn active_filter_只认_Active态() {
         // active_filter_of 返回 &FilterMode：模式要先解引用
-        assert!(matches!(*active_filter_of(&FilterState::Idle), FilterMode::None));
-        assert!(matches!(*active_filter_of(&FilterState::Error("re".into())), FilterMode::None));
+        assert!(matches!(
+            *active_filter_of(&FilterState::Idle),
+            FilterMode::None
+        ));
+        assert!(matches!(
+            *active_filter_of(&FilterState::Error("re".into())),
+            FilterMode::None
+        ));
         let fm = FilterMode::Text("ERR".into());
-        assert!(matches!(*active_filter_of(&FilterState::Active(fm)), FilterMode::Text(_)));
+        assert!(matches!(
+            *active_filter_of(&FilterState::Active(fm)),
+            FilterMode::Text(_)
+        ));
     }
 }

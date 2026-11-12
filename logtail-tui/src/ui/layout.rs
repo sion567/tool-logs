@@ -23,7 +23,12 @@ pub fn layout(area: Rect, has_detail: bool, ui: &UiState) -> LayoutOut {
 
     // 垂直：标题 3 + 主体 + 状态栏 1
     let title_h = 3.min(area.height);
-    let title = Rect { x: area.x, y: area.y, width: area.width, height: title_h };
+    let title = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: title_h,
+    };
     let statusbar = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(1),
@@ -39,7 +44,12 @@ pub fn layout(area: Rect, has_detail: bool, ui: &UiState) -> LayoutOut {
 
     // 主体水平切分（侧栏隐藏时日志区全宽）
     let left_w = side_w.min(body.width);
-    let left = Rect { x: body.x, y: body.y, width: left_w, height: body.height };
+    let left = Rect {
+        x: body.x,
+        y: body.y,
+        width: left_w,
+        height: body.height,
+    };
     let right = Rect {
         x: body.x + left_w,
         y: body.y,
@@ -72,7 +82,12 @@ pub fn layout(area: Rect, has_detail: bool, ui: &UiState) -> LayoutOut {
         width: right.width,
         height: log_h,
     };
-    let toolbar = Rect { x: right.x, y: right.y, width: right.width, height: 1 };
+    let toolbar = Rect {
+        x: right.x,
+        y: right.y,
+        width: right.width,
+        height: 1,
+    };
     let spark = Rect {
         x: right.x,
         y: right.y + 1,
@@ -108,13 +123,22 @@ mod tests {
 
     #[test]
     fn layout_侧栏与sparkline显隐() {
-        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
         let mut ui = UiState::from_config(&logtail_core::config::UiCfg::default());
         ui.show_sparkline = false;
         let out = layout(area, false, &ui);
         assert_eq!(out.left.width, 24);
         assert_eq!(out.spark.height, 0, "sparkline 隐藏");
-        assert_eq!(out.log.height, area.height - 3 - 1 - 1, "标题3+状态栏1+工具栏1之外全归日志");
+        assert_eq!(
+            out.log.height,
+            area.height - 3 - 1 - 1,
+            "标题3+状态栏1+工具栏1之外全归日志"
+        );
 
         ui.show_sidebar = false;
         let out = layout(area, false, &ui);
@@ -124,17 +148,30 @@ mod tests {
         // 溢出场景（40x12 + 详情）：日志区保底 4 行优先，详情压缩到剩余（至少 2 行）
         ui.show_sidebar = true;
         ui.show_sparkline = true;
-        let small = Rect { x: 0, y: 0, width: 40, height: 12 };
+        let small = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 12,
+        };
         let out = layout(small, true, &ui);
         let d = out.detail.unwrap();
         assert_eq!(out.log.height, 4, "40x12 保底日志 4 行");
         assert_eq!(d.height, 2, "详情压缩到 2");
         assert!(d.height >= 2 && d.height <= 16, "详情在 2..=16 之间");
-        assert_eq!(out.toolbar.height + out.spark.height + out.log.height + d.height, 8, "右区精确适配（body=12-3-1=8）");
+        assert_eq!(
+            out.toolbar.height + out.spark.height + out.log.height + d.height,
+            8,
+            "右区精确适配（body=12-3-1=8）"
+        );
         // 常规屏（24 行）+ 详情：详情优先 16，日志吃剩余（≥4）
         let out = layout(area, true, &ui);
         let d = out.detail.unwrap();
-        assert_eq!(out.log.height + d.height, 18, "常规屏 body 20 - 工具栏1 - spark1 = 18");
+        assert_eq!(
+            out.log.height + d.height,
+            18,
+            "常规屏 body 20 - 工具栏1 - spark1 = 18"
+        );
         assert!(out.log.height >= 4);
     }
 }
