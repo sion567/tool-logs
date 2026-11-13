@@ -1,4 +1,4 @@
-# logtail 使用手册
+# logtail-tui 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
 > 当前版本：v0.10.5（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
@@ -278,6 +278,9 @@ LOGTAIL_CMD="docker logs -f --tail 100 --timestamps my-app" \
 LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地文件泵，不经 SSH）
 ./logtail-tui --demo
 ```
+
+> `LOGTAIL_SRC=local` 时 `LOGTAIL_CMD` 填的是**本地文件路径**而非命令（历史命名沿用 CMD）：
+> `LOGTAIL_SRC=local LOGTAIL_CMD="C:/logs/app.log" ./logtail-tui --demo`
 
 `--version` / `-V` 打印版本。
 

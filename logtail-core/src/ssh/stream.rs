@@ -174,11 +174,4 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(got[0].ends_with("tail-marker"));
     }
-
-    #[test]
-    fn eof_与超时_分叉() {
-        // 语义锁定（§17）：超时与 EOF 是两种返回；真实 EOF 路径由
-        // tests/integration.rs 的 in-process sshd 覆盖
-        assert!(matches!(StreamEvent::Ended, StreamEvent::Ended));
-    }
 }

@@ -439,7 +439,7 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     } else if st.sidebar.focus {
         "侧栏: ↑↓:选 Enter:连接 Tab/Esc:返回 q:退出侧栏"
     } else {
-        "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 ←→:横滚 g:最新"
+        "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 S:折叠 ←→:横滚 g:最新"
     };
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
     // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
