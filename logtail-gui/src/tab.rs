@@ -82,9 +82,14 @@ pub struct Tab {
     view_filter: Option<FilterMode>,
     view_level: LevelFilter,
 
-    /// [v0.1.6] 行详情条：双击行 / 右键「查看完整行」打开，主视图固定单行，
-    /// 长行全文在详情条内折行（对应 TUI 详情面板心智）
+    /// [v0.1.6] 行详情条：双击行 / 右键「查看完整行」/ Enter 打开，主视图固定单行，
+    /// 长行全文在详情条内折行（对应 TUI 详情面板心智）；
+    /// [v0.1.7] ↑↓ 移动选中时同步此字段（详情跟随）
     pub detail_line: Option<u64>,
+    /// [v0.1.7] 详情条跟随滚动请求：↑↓ 移动选中后置位，渲染层定位后清
+    pub scroll_to_line: Option<u64>,
+    /// [v0.1.7] 上一帧滚动偏移（scroll_to_line 的可见性判断基准）
+    pub last_scroll_offset: f32,
 
     /// 本地文件大小（状态栏）；远程 tab 显示会话状态
     pub file_size: u64,
@@ -150,6 +155,8 @@ impl Tab {
             view_filter: None,
             view_level: LevelFilter::All,
             detail_line: None,
+            scroll_to_line: None,
+            last_scroll_offset: 0.0,
             file_size: 0,
         }
     }
@@ -228,6 +235,28 @@ impl Tab {
     pub fn clear_selection(&mut self) {
         self.selected = None;
         self.sel_focus = None;
+    }
+
+    /// [v0.1.7] 在视图内移动选中行（↑↓ 键，**详情条打开时调用**）：选中、区间、
+    /// 详情条一并跟随；返回新 line_no（视图空 → None）。移动后渲染层据此定位滚动。
+    pub fn move_selection(&mut self, delta: isize) -> Option<u64> {
+        let n = self.view.len();
+        if n == 0 {
+            return None;
+        }
+        // 当前选中在视图中的下标；被过滤掉的选中 → 取插入点最近的行
+        let idx = match self.selected.map(|no| self.view.binary_search(&no)) {
+            Some(Ok(i)) => i,
+            Some(Err(i)) => i.min(n - 1),
+            None => n - 1, // 无选中 → 末行（与 TUI move_selection 同语义）
+        };
+        let next = (idx as isize + delta).clamp(0, n as isize - 1) as usize;
+        let no = self.view[next];
+        self.selected = Some(no);
+        self.sel_focus = None;
+        self.detail_line = Some(no); // 详情跟随（详情关闭时此值下帧由渲染条件忽略）
+        self.scroll_to_line = Some(no);
+        Some(no)
     }
 
     /// 当前生效过滤（含缓存编译）；正则编译失败时返回 None 并记录 regex_error
@@ -519,5 +548,30 @@ mod tests {
         t.detail_line = Some(0);
         t.clear();
         assert!(t.detail_line.is_none());
+    }
+
+    #[test]
+    fn 移动选中_详情跟随与滚动请求() {
+        let mut t = tab();
+        t.ingest(vec!["a".into(), "b".into(), "c".into(), "d".into()]);
+        t.ensure_view();
+        // 无视图边界：末尾起点向上移（无选中 = 从末行起）
+        assert_eq!(t.move_selection(-1), Some(2), "无选中从末行起，-1 到倒数第二行");
+        assert_eq!(t.move_selection(-1), Some(1));
+        assert_eq!(t.selected, Some(1));
+        // 详情条与滚动请求跟随
+        assert_eq!(t.detail_line, Some(1));
+        assert_eq!(t.scroll_to_line, Some(1));
+        // 越界钳制
+        assert_eq!(t.move_selection(10), Some(3), "向下钳到末行");
+        assert_eq!(t.move_selection(-10), Some(0), "向上钳到首行");
+        // 过滤视图：选中被过滤掉时从插入点最近行继续
+        t.filter_input = "c".into();
+        t.ensure_view();
+        t.selected = Some(0); // a 已不在视图
+        assert_eq!(t.move_selection(1), Some(2), "插入点最近行起跳");
+        // 空视图
+        t.clear();
+        assert!(t.move_selection(1).is_none());
     }
 }

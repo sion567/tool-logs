@@ -267,7 +267,7 @@ impl LogTailApp {
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
         if ctx.egui_wants_keyboard_input() {
-            return; // 过滤框输入中：Ctrl+C 是复制选中文本，交给 egui
+            return; // 过滤框输入中：键全交给输入框
         }
         let copy = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(Key::C));
         if copy {
@@ -285,6 +285,41 @@ impl LogTailApp {
                 } else {
                     "已复制该行".into()
                 };
+            }
+        }
+
+        // [v0.1.7] 详情条键盘交互（与 TUI 统一）：Enter 开/关 · Esc 关 · ↑↓ 移动选中且详情跟随
+        let enter = ctx.input(|i| i.key_pressed(Key::Enter));
+        let esc = ctx.input(|i| i.key_pressed(Key::Escape));
+        let up = ctx.input(|i| i.key_pressed(Key::ArrowUp));
+        let down = ctx.input(|i| i.key_pressed(Key::ArrowDown));
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        if esc && self.tabs[ti].detail_line.is_some() {
+            self.tabs[ti].detail_line = None;
+            return;
+        }
+        if enter {
+            let t = &mut self.tabs[ti];
+            match t.detail_line.take() {
+                Some(_) => self.status = "已关闭详情条".into(),
+                None => match t.selected {
+                    Some(no) => {
+                        t.detail_line = Some(no);
+                        t.scroll_to_line = Some(no); // 不在视口时由渲染层带进视口
+                    }
+                    None => self.status = "先单击选中一行，再按 Enter 看详情".into(),
+                },
+            }
+            return;
+        }
+        if (up || down) && self.tabs[ti].detail_line.is_some() {
+            let delta = if up { -1 } else { 1 };
+            let t = &mut self.tabs[ti];
+            if t.move_selection(delta).is_some() {
+                t.follow = false; // 移动选中即暂停跟随（与 TUI move_selection 同语义）
+                self.status = "↑↓ 移动选中（详情跟随；点「↓ 末尾」恢复跟随）".into();
             }
         }
     }
@@ -575,12 +610,34 @@ impl LogTailApp {
             let mut filter_trace: Option<String> = None;
             let id = self.tabs[ti].id;
 
+            // [v0.1.7] 详情条跟随滚动：↑↓ 移动选中后，把该行带进视口（一次性偏移）
+            let mut force_offset: Option<f32> = None;
+            {
+                let tab = &mut self.tabs[ti];
+                if let Some(no) = tab.scroll_to_line.take()
+                    && let Ok(idx) = tab.view.binary_search(&no)
+                {
+                    let y0 = idx as f32 * row_h;
+                    let y1 = y0 + row_h;
+                    let off = tab.last_scroll_offset;
+                    let inner = tab.last_inner_h.max(1.0);
+                    if y0 < off {
+                        force_offset = Some(y0);
+                    } else if y1 > off + inner {
+                        force_offset = Some((y1 - inner).max(0.0));
+                    }
+                }
+            }
+
             let mut sa = ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .id_salt(("logrows", id))
-                .stick_to_bottom(follow);
+                .stick_to_bottom(follow && force_offset.is_none());
             if jump {
                 sa = sa.vertical_scroll_offset(jump_offset);
+            }
+            if let Some(off) = force_offset {
+                sa = sa.vertical_scroll_offset(off);
             }
             let tab = &mut self.tabs[ti];
             // [v0.1.6] 行高恒定 → show_rows 虚拟化（变高行前缀和机制随主视图撤换行而删除）；
@@ -686,6 +743,7 @@ impl LogTailApp {
             let at_bottom = out.state.clamped_offset().y >= max_off - 2.0;
             let tab = &mut self.tabs[ti];
             tab.last_inner_h = inner_h;
+            tab.last_scroll_offset = out.state.clamped_offset().y; // [v0.1.7] 详情跟随的可见性基准
             if let Some(text) = copy_line {
                 ui.ctx().copy_text(text);
                 self.status = "已复制".into();
@@ -749,6 +807,7 @@ impl LogTailApp {
                                 ui.ctx().copy_text(raw.clone());
                                 self.status = "已复制".into();
                             }
+                            ui.label(RichText::new("Enter/Esc 关 · ↑↓ 移动选中跟随").weak());
                         });
                     });
                     ui.separator();

@@ -87,7 +87,7 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     }
     render_logs(frame, out.log, st);
 
-    // 详情面板（Day6）：时间/级别/源/原始行/上下文±N
+    // 详情面板（Day6→v0.10.6）：时间/级别/源/原始行/trace_id——只显示当前行（±N 上下文撤销）
     if let (Some(rect), Some(panel)) = (out.detail, st.detail_panel.clone()) {
         render_detail(frame, rect, st, &panel);
     }
@@ -484,7 +484,10 @@ fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// 详情面板（§12.1 底部）：时间 / 级别 / 源 / 原始行 / 上下文±N / 操作提示
+/// 详情面板（§12.1 底部）：时间 / 级别 / 源 / 原始行 / trace_id / 操作提示。
+/// [v0.10.6] 真机反馈：±N 上下文展示"有点奇怪"→ 只显示当前行；
+/// 带走一段现场用 `C`（复制上下文块，仍按 context_before/after 取）。
+/// 跟随：↑↓ 改选中后 move_selection 同步 panel.line_no，面板内容随之刷新。
 fn render_detail(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
@@ -526,26 +529,6 @@ fn render_detail(
             Span::styled("原始: ", Style::default().fg(Color::DarkGray)),
             Span::raw(line.raw.clone()),
         ]));
-        // [v0.7.6] 去掉"上下文±N"标签行（信息并入 block title），±5 全部可见
-        // 上下文窗口：选中行标 ▶（Day6 验收）
-        for cl in buf.context(panel.line_no, panel.context_before, panel.context_after) {
-            let marker = if cl.line_no == panel.line_no {
-                ">"
-            } else {
-                " "
-            };
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("{marker} "),
-                    Style::default().fg(if cl.line_no == panel.line_no {
-                        Color::Yellow
-                    } else {
-                        Color::DarkGray
-                    }),
-                ),
-                Span::styled(cl.raw.clone(), Style::default().fg(level_color(cl.level))),
-            ]));
-        }
     } else {
         lines.push(Line::from(Span::styled(
             "该行已被淘汰（buffer 窗口外）",
@@ -553,7 +536,7 @@ fn render_detail(
         )));
     }
     lines.push(Line::from(Span::styled(
-        "q:关闭 c:复制 t:trace过滤 p:聚焦源",
+        "q:关闭 c:复制行 C:复制上下文块 t:trace过滤 p:聚焦源",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -563,7 +546,7 @@ fn render_detail(
         Paragraph::new(lines)
             .wrap(ratatui::widgets::Wrap { trim: false })
             .block(Block::default().borders(Borders::ALL).title(format!(
-                "选中行详情 line_no={}（上下文±{}）  q:关 c:复制行 C:复制上下文 t:trace p:源",
+                "选中行详情 line_no={}  q:关 c:复制行 C:复制上下文±{} t:trace p:源",
                 panel.line_no, panel.context_after
             ))),
         area,
@@ -1098,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn 渲染_详情面板与上下文标记() {
+    fn 渲染_详情面板只显示当前行() {
         let mut st = test_state();
         st.selected_line_no = Some(1);
         st.detail_panel = Some(crate::app::DetailPanel {
@@ -1110,7 +1093,9 @@ mod tests {
         let all = rows(&t).join("\n");
         let f = flat(&all);
         assert!(f.contains("选中行详情"), "详情面板标题: {all}");
-        assert!(all.contains(">"), "上下文选中标记: {all}");
         assert!(f.contains("原始:dberror"), "原始行: {all}");
+        // [v0.10.6] ±N 上下文撤销：不再有 ▶ 标记，标题无"（上下文±N）"标签
+        assert!(!all.contains(">"), "上下文选中标记应已移除: {all}");
+        assert!(!f.contains("（上下文±"), "标题不应再带上下文标签: {all}");
     }
 }

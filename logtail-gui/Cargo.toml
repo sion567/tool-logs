@@ -1,6 +1,6 @@
 [package]
 name = "logtail-gui"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "BareTail 风格的图形界面日志查看器（本地文件 + 远程源），复用 logtail-core 核心库"
 

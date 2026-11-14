@@ -52,6 +52,16 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.10.6，详情只显示当前行 + GUI 详情条键盘统一）
+
+真机反馈：①TUI 详情面板的 ±5 上下文展示"有点奇怪"；②GUI 详情条只有双击/右键入口，选中行移动后详情不跟随。统一为一套交互——**Enter 显示详情、↑↓ 移动且详情跟随、详情只显示当前行**：
+
+- TUI：`render_detail` 撤 ±N 上下文循环，只显示 时间/级别/源/原始行/trace_id + 键位提示；`C` 复制上下文块保留（显示撤了、带走现场的能力还在，面板标题提示 ±N）；↑↓ 跟随机制本就存在（move_selection 同步 panel.line_no），未动
+- GUI（0.1.7）：Enter 开/关详情条（有选中才开）、Esc 关闭、↑↓ 移动选中且详情条跟随（`Tab::move_selection`：视图内移动，选中/区间/详情条/`scroll_to_line` 四同步；渲染层一次性偏移把选中行带进视口，与 stick 冲突时该帧禁 stick；移动即暂停跟随，与 TUI 同语义）。双击/右键入口保留
+- 文档：§12 mock 与任务清单撤"上下文 ±N"
+
+**测试**：TUI `渲染_详情面板与上下文标记`→`渲染_详情面板只显示当前行`；GUI 新增 `移动选中_详情跟随与滚动请求`——clippy 0。
+
 ## 变更记录（v0.10.5，撤主视图换行 → 详情面板折行）
 
 真机反馈三症状：GUI 勾选换行后 2 行的记录多空一行、3 行的第三行裁一半、一条 JSON 记录只显示 `{{"id":-` 8 个字符且最多 3 行。根因两层：①GUI 行高来自**字符网格估算**（`visual_cols÷每行列数`），实际绘制却交给 egui **按词折行**（UAX#14 断点/像素宽），两套算法不一致——估多留白、估少裁字；②core 的 docker JSON 拆壳只 trim 末尾 `\n`，**一条记录打印多行内容**（pretty JSON/异常栈）时中间真实换行保留在 raw 里，egui `LayoutJob` 在每个 `\n` 处强制断行（`{{"id":-` 后即断），行高估算又把 `\n` 当 1 列——"最多 3 行"实为估算截断。
@@ -664,7 +674,7 @@ async fn main() -> anyhow::Result<()> {
 
 **任务清单**
 - [x] `selected_line_no: Option<u64>`；上翻自动暂停跟随
-- [x] 详情面板：时间 / 级别 / 源 / 原始行 / 上下文 ±N / 操作提示
+- [x] 详情面板：时间 / 级别 / 源 / 原始行 / trace_id / 操作提示（[v0.10.6] 撤 ±N 上下文展示，`C` 仍可复制上下文块）
 - [x] `LevelFilter` 统一 `>=`；`1`=Error `2`=Warn `3`=Info `4`=Debug `0`=All
 - [x] 详情态 `c` 复制、`t` 按 trace_id 过滤、`p` 只看该源、`q` 关面板
 - [x] 空格暂停/恢复跟随；`G` 跳最新
@@ -1751,7 +1761,7 @@ pub fn routes_to_filter(k: &KeyEvent, fs: &FilterState) -> bool {
 │ 预设           │ 时间: 2026-01-05 14:02:04                     │
 │  仅ERROR(1h)   │ 级别: ERROR   源: prod-01/my-app             │
 │  慢请求        │ 原始: db connection refused                   │
-│                │ 上下文 ±5 …                                    │
+│                │ trace_id: 9f8e7d6c…（有才显示）                │
 ├────────────────┴───────────────────────────────────────────────┤
 │ P:暂停 /:过滤 f:模式 r:正则 1-4:级别 c:复制 C:清屏 L:更早 R:重连 q:退 │ 1240行 2匹配 │
 └──────────────────────────────────────────────────────────────┘
@@ -1814,7 +1824,7 @@ fn render(frame: &mut Frame, st: &mut AppState) {
 
     if let Some(rect) = out.detail {
         if let Some(no) = st.selected_line_no {
-            render_detail(frame, rect, st, no); // 时间/级别/原始/上下文±N
+            render_detail(frame, rect, st, no); // 时间/级别/原始/trace_id [v0.10.6 撤±N]
         }
     }
     render_statusbar(frame, out.statusbar, st);
