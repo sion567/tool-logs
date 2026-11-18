@@ -1,5 +1,6 @@
 //! 配置格式（§8）
 
+pub mod keyring;
 pub mod load;
 pub mod server;
 pub mod source_cfg;
@@ -26,6 +27,9 @@ pub struct UiCfg {
     /// [v0.10] 相似行折叠 ×N
     #[serde(default)]
     pub dedupe: Option<bool>,
+    /// [v0.10.8] 倒序显示（最新在顶）；None/false = 时间正序（默认）
+    #[serde(default)]
+    pub reverse: Option<bool>,
 }
 
 impl Default for UiCfg {
@@ -35,6 +39,7 @@ impl Default for UiCfg {
             show_sidebar: true,
             show_hints: true,
             dedupe: None,
+            reverse: None,
         }
     }
 }
@@ -100,4 +105,63 @@ pub struct PresetCfg {
     pub level: Option<String>,
     /// docker 源直接用；journalctl 源在 to_command 里换算绝对时间
     pub since: Option<String>,
+}
+
+impl PresetCfg {
+    /// [v0.10 core 化] 转运行时预设（原 TUI app.rs 的 parse_level 收编，两前端共用）：
+    /// level 字符串→LevelFilter（非法值按 None 处理），since 原样透传。
+    pub fn to_preset(&self, key: &str) -> crate::source::Preset {
+        crate::source::Preset {
+            key: key.to_string(),
+            name: self.name.clone().unwrap_or_else(|| key.to_string()),
+            level: self.level.as_deref().and_then(parse_level),
+            since: self.since.clone(),
+        }
+    }
+}
+
+fn parse_level(s: &str) -> Option<crate::log::LevelFilter> {
+    match s.to_lowercase().as_str() {
+        "error" => Some(crate::log::LevelFilter::Error),
+        "warn" | "warning" => Some(crate::log::LevelFilter::Warn),
+        "info" => Some(crate::log::LevelFilter::Info),
+        "debug" => Some(crate::log::LevelFilter::Debug),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+
+    #[test]
+    fn 预设转换_级别解析与缺省名() {
+        let pc = PresetCfg {
+            name: Some("仅ERROR(1h)".into()),
+            level: Some("error".into()),
+            since: Some("1h".into()),
+        };
+        let p = pc.to_preset("quick_error");
+        assert_eq!(p.key, "quick_error");
+        assert_eq!(p.name, "仅ERROR(1h)");
+        assert_eq!(p.level, Some(crate::log::LevelFilter::Error));
+        assert_eq!(p.since.as_deref(), Some("1h"));
+        // 缺省名回落 key；warning 别名；非法级别按 None；无 since
+        let pc2 = PresetCfg {
+            name: None,
+            level: Some("WARNING".into()),
+            since: None,
+        };
+        let p2 = pc2.to_preset("k");
+        assert_eq!(p2.name, "k");
+        assert_eq!(p2.level, Some(crate::log::LevelFilter::Warn));
+        let pc3 = PresetCfg {
+            name: None,
+            level: Some("灾难级".into()),
+            since: None,
+        };
+        assert_eq!(pc3.to_preset("k").level, None);
+    }
 }

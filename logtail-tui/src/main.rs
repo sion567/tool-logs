@@ -15,6 +15,10 @@ async fn main() -> Result<()> {
     if let Some(pos) = args.iter().position(|a| a == "--check-config") {
         return check_config(args.get(pos + 1));
     }
+    // [v0.10.9] keyring 子命令：密码写入/移出系统密钥环（§16.3），不进 TUI
+    if args.len() >= 2 && args[1] == "keyring" {
+        return keyring_cmd(&args[2..]);
+    }
     if args.iter().any(|a| a == "--demo") {
         demo::run().await
     } else {
@@ -65,9 +69,14 @@ fn check_config(path: Option<&String>) -> Result<()> {
         println!("⚠ 没有配置任何 [[servers]]——侧栏将无服务器可选");
     }
     for srv in &cfg.servers {
+        // [v0.10.9] 认证方式按变体显示（明文时提示迁移密钥环）
         println!(
-            "✔ server [{}]: {}@{}:{}（密码认证）",
-            srv.name, srv.user, srv.host, srv.port
+            "✔ server [{}]: {}@{}:{}（{}）",
+            srv.name,
+            srv.user,
+            srv.host,
+            srv.port,
+            srv.auth.label()
         );
     }
     for src in &cfg.sources {
@@ -95,6 +104,76 @@ fn check_config(path: Option<&String>) -> Result<()> {
         anyhow::bail!("{} 个源的 server 引用无效，修正后再启动", bad.len());
     }
     println!("✔ 配置整体有效，可以启动 ./logtail-tui");
+    Ok(())
+}
+
+/// [v0.10.9] keyring 子命令：把服务器密码写入/移出系统密钥环（§16.3），不进 TUI。
+/// 用法：`logtail-tui keyring set <服务器名>` / `logtail-tui keyring del <服务器名>`
+fn keyring_cmd(rest: &[String]) -> Result<()> {
+    match (rest.first().map(|s| s.as_str()), rest.get(1).map(|s| s.as_str())) {
+        (Some("set"), Some(name)) => keyring_set(name),
+        (Some("del") | Some("delete"), Some(name)) => keyring_del(name),
+        _ => {
+            eprintln!("用法: logtail-tui keyring set|del <服务器名>");
+            eprintln!("  set  交互输入密码（隐藏回显，输两遍确认）写入系统密钥环");
+            eprintln!("  del  从系统密钥环删除该服务器的条目");
+            eprintln!("写入后把 config.toml 里该服务器的 auth 改为 {{ type = \"keyring\" }}");
+            anyhow::bail!("缺少子命令或服务器名");
+        }
+    }
+}
+
+/// set：按 config 定位服务器（校验存在 + 取 keyring account 覆盖），交互隐藏输入
+fn keyring_set(name: &str) -> Result<()> {
+    let cfg = logtail_core::config::load()?;
+    let srv = cfg.servers.iter().find(|s| s.name == name).ok_or_else(|| {
+        let known: Vec<&str> = cfg.servers.iter().map(|s| s.name.as_str()).collect();
+        if known.is_empty() {
+            anyhow::anyhow!("config.toml 里没有服务器 [{name}]（尚未配置任何 [[servers]]）")
+        } else {
+            anyhow::anyhow!("config.toml 里没有服务器 [{name}]（现有: {}）", known.join(", "))
+        }
+    })?;
+    // 账户名与 resolved_auth 的解析规则一致：显式 account 优先，缺省 = 服务器名；
+    // 认证尚未切到 keyring 时也允许预存（先存密码、后改配置，顺序不敏感）
+    let account = match &srv.auth {
+        logtail_core::config::AuthCfg::Keyring { account } => {
+            account.clone().unwrap_or_else(|| name.to_string())
+        }
+        _ => name.to_string(),
+    };
+    println!(
+        "为服务器 [{name}]（{}@{}:{}）设置密钥环密码，账户: {account}",
+        srv.user, srv.host, srv.port
+    );
+    let pw1 = rpassword::prompt_password("请输入密码（输入不回显）: ")?;
+    if pw1.is_empty() {
+        anyhow::bail!("密码不能为空");
+    }
+    let pw2 = rpassword::prompt_password("再输一遍确认: ")?;
+    if pw1 != pw2 {
+        anyhow::bail!("两次输入不一致，未写入");
+    }
+    logtail_core::config::keyring::set(&account, &pw1)?;
+    println!("✔ 已写入系统密钥环（服务 {} / 账户 {account}）", logtail_core::config::keyring::SERVICE);
+    println!("  现在可以把 config.toml 里该服务器的 auth 改为 {{ type = \"keyring\" }}");
+    Ok(())
+}
+
+/// del：配置里已删掉该服务器也要能清凭据残留（查不到就按服务器名当账户名）
+fn keyring_del(name: &str) -> Result<()> {
+    let account = logtail_core::config::load()
+        .ok()
+        .and_then(|cfg| cfg.servers.into_iter().find(|s| s.name == name))
+        .map(|srv| match srv.auth {
+            logtail_core::config::AuthCfg::Keyring { account } => {
+                account.unwrap_or(srv.name)
+            }
+            _ => srv.name,
+        })
+        .unwrap_or_else(|| name.to_string());
+    logtail_core::config::keyring::delete(&account)?;
+    println!("✔ 已从系统密钥环删除条目（账户 {account}）");
     Ok(())
 }
 

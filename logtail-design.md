@@ -52,6 +52,54 @@
 | 冷启动还要手动选源，不算严格"一键" | `remember_last_source`，启动自动连上次源；§1.2"多 tab"标注 MVP=切换、v0.5=同屏 | §1.2、§8、§四 D5 |
 
 
+## 变更记录（v0.10.10，分屏：双栏同时 tail，§20 v0.5 路线扫尾）
+
+用户确认启动路线图最后一个远期项**分屏**（tab 部分早已落地）。设计原则是**控制改动面**——TUI 焦点栏复用既有全局字段、GUI 复用天然 per-tab 的 Tab 状态，分屏只是渲染层切分：
+
+- **TUI 0.10.10**：`SplitView { bg: BgPane, bg_left }` 副栏结构（source/following/scroll/selected/cleared_before/view_cache 逐栏独立）；**焦点栏 = 既有 active_source/following/viewport/selected/view_cache/cleared_before 字段原样复用**——键盘层/连接层/导出/详情面板零改动天然作用于焦点栏。`w` 开关（副栏取第一个非焦点已连接 tab，无则占位）、`n` 换栏（`std::mem::swap` 焦点栏↔副栏 + bg_left 翻转 + last_rebuild+1，两栏屏幕位置固定内容互换）。`render_logs` 参数化为 `PaneView` 借用视图（窗口切片/折叠/倒序/滚动条公式与单栏一致）；每栏 1 行栏头 `[源名] ● 跟随/‖ 暂停`（焦点栏蓝底反白）；`layout::split_log` 纯函数（宽 ≥100 列左右、窄屏上下，1 列/行缝隙）；副栏命中缓存按 last_rebuild 独立重建（spark 置空——时间轴只反映焦点栏）；drain_session 暂停钉窗扩展到副栏；连接/`,`/`.` 均进焦点栏（status 提示）；状态栏 hint 追加 `w:分屏`/`n:换栏`。会话级不持久化（副栏源是会话概念）
+- **GUI 0.2.3**：`prefs.split` 记忆到 gui.toml；工具栏「分屏」勾选（≥2 个 tab 才可用）；`log_area` 抽取 `draw_log_pane`（单栏/分屏共用：视图重建→栏头→show_rows→跟随状态机），分屏 = 激活 tab 在左 + `split_other_idx`（下一 tab 循环）在右 + 10px 缝隙；两栏各自跑完整跟随状态机（倒序钉顶/暂停钉窗 per-tab 复用）；副栏跟随暂停静默（状态栏只反映激活栏，避免互覆）；详情条/sparkline/键盘仍归属激活栏。**真机修复（Windows 截图取证）**：窗格最初包在 `ui.horizontal` 里，egui 0.37 的 ScrollArea 双阶段布局在 horizontal 子 Ui 中坐标/裁剪错位——行内容画进面板外、整窗日志文字消失、底部露 wgpu 清屏黑带（倒序/分屏同时中招，正是用户报的"都是乱的"）；改为**绝对坐标 `scope_builder` 直切两栏**（不经 cursor 流式布局），栏头高度从内容盒实扣（此前 header+全高盒重叠溢出）；四场景截图回归（正序/倒序/分屏/分屏+倒序）像素+OCR 验证通过
+- **语义边界**：TUI 过滤/级别/正则/折叠**两栏共享**（同一次排障两边同筛；逐栏独立过滤留后续）；副栏连接需先 `n` 换焦点再侧栏连接；同源可两栏同显（"跟随 + 回看"组合）
+
+**测试**：`layout_分屏切分_方向与守恒`、`渲染_分屏双栏_各源各行`（TestBackend 双栏头+各自源行）、`分屏_开关换栏_状态随栏走`、`drain_分屏副栏暂停钉窗`（构造无连接 ActiveSession 直测）、`键盘_w分屏_n换栏`、GUI `分屏副栏下标_激活的下一个循环` + prefs `split` 往返。全 workspace 测试绿、clippy 0。
+
+## 变更记录（v0.10.9，密钥环认证：密码出明文 config.toml）
+
+用户确认启动远期项清单里的**密钥环**（§16.3/§19 留档项）。SSH 密码可选存入 OS 凭据库（`keyring` crate：Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service+vendored libdbus），config.toml 只留引用；**明文 `password` 认证完全向后兼容**，两种方式长期并存：
+
+- **core 0.10.7**：`AuthCfg::Keyring { account: Option<String> }` 第三认证变体（内部 tag，`auth = { type = "keyring" }` 直接可写，账户缺省 = 服务器 name）；`config/keyring.rs` 封装 get/set/delete（服务名 `logtail`，NoEntry 给可操作指引、del 幂等）；`ServerConfig::resolved_auth()`（Keyring→取密钥环转 Password，连接时解析）/`resolved_sudo_password()`（显式 sudo_password 优先→复用登录密码→None，**收口 TUI do_connect 与 GUI remote 两份重复回退逻辑**）；`client.rs connect_with` 补 Keyring 直连防御分支（应先经 resolved_auth）；`AuthCfg` 派生 PartialEq + `label()` 展示
+- **TUI 0.10.9**：`do_connect` 改用解析方法；新子命令 `logtail-tui keyring set|del <服务器名>`（`rpassword` 隐藏输入两遍确认；set 按 config 校验服务器存在与账户名，del 查不到配置也按名清理残留）；`--check-config` 按 `auth.label()` 显示认证方式（明文附迁移提示）；`--demo`/测试路径不受影响
+- **GUI 0.2.2**：`connect_session` 在 pump 线程解析（**GUI 前端内存只见 Keyring 引用，永不持有密钥**），失败走既有 `[连接失败]` 注入路径；`sudo_password_of` 删除（语义迁 core），回退测试随迁
+- **测试**：测试态共享内存凭据库（自实现 `CredentialApi`，按账户 Arc 共享模拟持久化——keyring 自带 mock 是 EntryOnly 不跨 Entry 存活，不合用），覆盖存取删往返/NoEntry 指引/Keyring 解析转换/明文密钥原样/sudo 四条回退路径/两种 TOML 写法解析；TEMPLATE 加 keyring 注释样例
+- **已知边界**：sudo 需与登录密码不同时仍用明文 `sudo_password`（后续可加 `<账户>#sudo` 第二条目）；Linux 无 Secret Service（无头服务器）时报错回退明文；原留档"启动时提示"不做——以 keyring 子命令 + check-config 提示替代，避免启动打扰
+
+**测试**：core 47 用例全绿（+4）；全 workspace 测试绿、clippy 0。真机需人工过一遍：Windows 凭据管理器可见 `logtail` 条目、TUI/GUI 换 keyring 认证后连接成功、keyring del 后报可操作错误。
+
+## 变更记录（v0.10.8，倒序显示：最新在顶，TUI o 键 + GUI 工具栏开关）
+
+用户反馈"其他日志工具都是倒序的"——新增**倒序显示**（最新在顶，ktail/BareTail 等工具的同款视图）。**默认关**（时间正序不变），手动开启并记忆：TUI `o` 键（config `[ui] reverse` + state.toml `ui_reverse`），GUI 工具栏「倒序」勾选（gui.toml `reverse`）。核心约束：**数据层零改动**——`LogBuffer`/`rebuild_view` 仍升序 line_no，倒序只做在渲染层，选中/复制/上下文/导出/trace 过滤全按 line_no 键不受影响，**导出文件恒时间正序**：
+
+- **core 0.10.6**：`UiCfg.reverse: Option<bool>`（config `[ui]` 默认值，缺省 None=false）+ `StateFile.ui_reverse: Option<bool>`（旧 state.toml 缺键回落 None，serde 忽略残留键的既有兼容不变）
+- **TUI 0.10.8**：`render_logs` 窗口切片公式两序**数学等价**（正序 scroll_y 从底部数、倒序从顶部数），仅把切片**反向迭代**；折叠自切片尾向前吞并（等值游程对称，分组集合与正序一致，代表行取组内最新行）；滚动条 thumb 从顶部计（顶=最新）；`o` 键切换即复位跟随（scroll_y=0，最新端）；↑↓/PageUp/PageDown 方向随视觉翻转（`sel_delta`：倒序 Down=视觉向下=更旧=hits 下标 -1），`move_selection` 可见性数学与行序无关不动；暂停钉窗 `scroll_y += pushed` 两序通用（drain_session 零改动）
+- **GUI 0.2.1**：`show_rows` 行循环下标反转（`di = n-1-i`，dedupe 组为 display 单元整体换位）；跟随语义随行序翻转——正序 `stick_to_bottom`，倒序改**钉顶**（每帧 `vertical_scroll_offset(0)`，本帧有滚轮输入时让路：egui 0.37 `stick_to_bottom` 由 `scroll_stuck_to_end` 状态自动让路用户滚动，顶部钉住须自行判定 `smooth_scroll_delta`）；follow 状态机倒序分支以"是否在顶"判暂停/恢复（滚离顶部暂停、滚回顶部恢复，文案区分）；**倒序暂停钉窗**：`Tab::pending_top_rows` 在 pump 累积暂停期新入行数，渲染层把视口下移 `pending×row_h` 钉住后清零（新行从顶部涌入不顶走正在看的内容）；详情条 `scroll_to_line` 定位按视觉行 `n-1-display下标` 映射；↑↓ 详情导航 delta 倒序取反；工具栏「↓ 末尾」倒序时文案「↑ 最新」
+- **已知小边界**：倒序+折叠开启且暂停时，若新行恰好与顶部折叠组同 body 合并，钉窗偏移合并量（TUI/GUI 同此特征），可接受
+
+**测试**：TUI 新增 `渲染_倒序最新在顶`（跟随态顶行=L29、窗口仍 18 行、最旧行不残留）/`渲染_倒序_折叠组与行序`（×4 保持、最新行排最上）/`键盘_o倒序_方向翻转与跟随复位`；GUI `Prefs` 往返测试补 `reverse` 断言（旧 gui.toml 缺键回落 false）。全 workspace 测试绿。真机需人工过一遍：TUI `o` 切换后 Space 暂停等新行钉窗、GUI 勾「倒序」后滚离/滚回顶部的自动暂停恢复。
+
+## 变更记录（v0.10.7，GUI 功能对齐 TUI：模式/远筛/预设/折叠/时间轴）
+
+用户指出两套 UI 功能不一致、GUI 缺口多，逐项对齐（GUI 0.1.7 → **0.2.0**）。GUI 维持「连接源对话框 + 工具栏控件」形态（不加常驻侧栏），会话参数全部**按 tab 走**（TUI 是全局单值，GUI 多 tab 并存语义本就要求 per-tab）：
+
+- **core 0.10.5 下沉三个纯函数**（TUI app.rs → core，`pub use` 保持 TUI 路径兼容，测试随迁）：`next_earlier_mode`（L 键前移规则，→ source/mod.rs）、`sparkline`（→ log/mod.rs）、`PresetCfg::to_preset`（parse_level 收编，→ config/mod.rs）
+- **GUI 模式系统**：工具栏模式下拉（全量/快捷1h/快捷24h/精准近1h，改动即重连）+「⏮ 更早」（`next_earlier_mode` 前移）；`reconnect_active` 不再硬编码 `Full`——mode/远筛取 tab 自身，且重连换**新 tab id**（旧会话迟到的 Lines/Ended 挂旧 id 被丢弃，不再污染新会话；先显式 Stop 再连）
+- **GUI 远筛**（TUI P 键对齐）：工具栏「远筛」开关，`check_pattern` 校验后随重连生效；`remote.rs` 抽纯函数 `build_command`（to_command → sudo → grep 管道顺序与 TUI do_connect 一致，单测锁定）
+- **GUI 预设**：「连接源」对话框加预设区（`to_preset` 应用到激活远程 tab：level 本地立即生效，since 改模式重连——同 TUI 侧栏语义）
+- **GUI 折叠 ×N + sparkline**（TUI S 键/v 键对齐）：`ensure_view(dedupe)` 产出折叠显示列表 `display`（相邻同 body+level 合并，渲染统一走 display 不分支），工具栏「折叠」「时间轴」勾选持久化到 gui.toml（旧配置缺键回落默认开）；工具栏下细条画每秒日志量
+- **GUI 键盘**：`,`/`.` 与 Ctrl(+Shift)+Tab 切 tab；`←→` 长行横滚（半屏步进）、`Home` 复位——主视图单行语义下的 TUI 同款
+- **GUI 体验**：docker `permission denied…docker.sock` 自动状态栏提示修复命令（TUI drain_session 同文案）；`last_tab` 记忆上次激活 tab，启动受 `remember_last_source` 门控自动恢复
+- **详情上下文修正**：本轮原计划给 GUI 详情条加 ±5 上下文展示，落地时发现 **v0.10.6 已按真机反馈撤掉 TUI 的 ±N 展示**（两套 UI 已收敛"详情只显示当前行"）——撤回展示计划，改补齐真正对齐的能力：详情条「复制上下文」按钮（`Tab::context_text`，同 TUI `C` 键 ±5 带走现场）。USAGE §7.3/§6 残留的 ±5 展示描述一并修正
+
+**测试**：core 测试随迁 + `PresetCfg` 转换用例；GUI 新增 `折叠显示列表_相邻同body合并与开关`/`display_row_of_view下标映射到折叠组`/`spark_宽度与数据变化时重算`/`复制上下文块_拼接与淘汰跳过`/`命令拼装_sudo包裹后接远筛管道`/`sudo密码_缺省复用登录密码_非sudo恒无`/`远程tab_模式与远筛字段初值`——全 workspace 测试绿、clippy 0。远程链路（模式/更早/远筛/预设）需真机过一遍：命令拼装已由 `build_command` 单测锁定。
+
 ## 变更记录（v0.10.6，详情只显示当前行 + GUI 详情条键盘统一）
 
 真机反馈：①TUI 详情面板的 ±5 上下文展示"有点奇怪"；②GUI 详情条只有双击/右键入口，选中行移动后详情不跟随。统一为一套交互——**Enter 显示详情、↑↓ 移动且详情跟随、详情只显示当前行**：
@@ -2024,7 +2072,7 @@ pub enum LogtailError {
 1. **命令注入**：`to_command` 入口统一 `check_ident`；白名单外的字符直接 `UnsafeInput`，**不拼进字符串**。
 1.5. **主机密钥 TOFU**（[v0.10 §16.5 已落地]）：首连记录指纹到 `~/.config/logtail/known_hosts`，之后校验、不匹配拒绝——§16.5"开发态盲信"已修复。
 2. **`Command` 源是逃生舱**：`source = { type = "command", cmd = "..." }` 跳过校验，用户自己保证安全，文档与 UI 都要标注"危险"。
-3. **密码落盘**：toml 里 `password` 仅靠文件权限 `0600` 防护；后续迁移系统密钥环（`keyring` crate），启动时提示，不在二进制写死。
+3. **密码落盘**（[v0.10.9 已落地]）：`AuthCfg::Keyring` 认证——密码存系统密钥环（`keyring` crate：Windows 凭据管理器/macOS 钥匙串/Linux Secret Service），config.toml 只留引用；写入入口 `logtail-tui keyring set` 子命令（交互隐藏输入），解析收口 `ServerConfig::resolved_auth`/`resolved_sudo_password`（连接时取密钥环，前端内存不碰密钥）。原"启动时提示"不做（避免打扰），以子命令 + `--check-config` 认证方式提示替代；明文 `password` 认证向后兼容长期并存。
 4. **`~` 展开**：只认 `~/` 前缀；`HOME` 缺失则原样返回，让连接阶段暴露明确错误。
 5. **首次主机密钥**：当前 `check_server_key` 返回 `Ok(true)` 仅开发态；上线前改指纹固定列表或 `known_hosts` 校验。
 6. **远程预过滤开关**（v0.6 已落地）：`P` 键把本地过滤推到远端，命令尾接 `| grep -E --line-buffered '<pat>'`。pattern 走专用白名单 `check_pattern`（放行正则元字符、拒 `'"` 反引号 `$ ; &`），`apply_prefilter` 统一包装，工具栏 `远筛:` 指示显式警示注入面。
@@ -2221,7 +2269,7 @@ async fn eof_terminates_pump() {
 | docker 非 tty 无颜色 | 级别色靠本地加 | 可选 `--tty` 或识别库自带色码 |
 | 日志轮转 | `tail -F` 多数 OK，极端 rename 需重盯 | 监听 inode 变化自动重开 |
 | 无持久化 | 关掉就没了 | **会话级导出 `.log` 已落地（`e` 键，v0.7）**；不做长期存储 |
-| 密码明文 toml | 本地泄露风险 | 迁移系统密钥环 |
+| 密码明文 toml | 本地泄露风险 | **密钥环认证已落地（v0.10.9，§16.3）**：`{ type = "keyring" }` 存 OS 凭据库；明文认证并存可选 |
 | ANSI 混合输出 | 复杂转义可能乱 | 已落地 `strip_ansi` 剥除（v0.4）；样式保留（远端色→ratatui 样式映射）留给 anstyle-parse |
 | 多源并发上限 | 开太多连不优雅 | 连接池 + per-source backpressure |
 | 时间解析覆盖 | 只认 RFC3339 + 常见格式 | 配置自定义时间格式串 |
@@ -2235,7 +2283,7 @@ async fn eof_terminates_pump() {
 | 版本 | 功能 | 依赖本章 |
 |------|------|---------|
 | v0.4 | 正则过滤完善 + 多关键词反白 + 相似行折叠（×N）（**完善与折叠已随 v0.10.0 落地**） | §11、§12.3 |
-| v0.5 | 多源 tab / 分屏同时 tail（**tab 部分已随 v0.5.0 落地**，分屏留 v0.5.x） | §9、§13 |
+| v0.5 | 多源 tab / 分屏同时 tail（**tab 已随 v0.5.0、分屏已随 v0.10.10 落地**） | §9、§13 |
 | v0.6 | 远程预过滤开关（显式警示注入面）（**已随 v0.6.0 落地**） | §16.6 |
 | v0.7 | 会话日志导出、时间轴 sparkline、加载更早（**已随 v0.7.0 落地**） | §5、§12 |
 | v0.8 | Loki 数据源（短期历史）+ 本地流双模（**已随 v0.8.0 落地**） | 新数据源，核心不动 |

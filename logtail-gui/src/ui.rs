@@ -16,11 +16,12 @@ use eframe::egui::{
 use logtail_core::config::{Config, SourceConfig};
 use logtail_core::log::export_session;
 use logtail_core::log::filter::LevelFilter;
+use logtail_core::source::{ModeVariant, Preset, check_pattern, next_earlier_mode};
 use logtail_core::ssh::StreamEvent;
 
-use crate::prefs::Prefs;
+use crate::prefs::{LastTab, Prefs};
 use crate::pump::{Pump, PumpCmd};
-use crate::tab::{SessionState, Tab, TabKind, level_color, raw_hits};
+use crate::tab::{SessionState, Tab, TabKind, level_color, raw_hits, split_other_idx};
 
 /// 日志区底色（BareTail 白底）
 const LOG_BG: Color32 = Color32::WHITE;
@@ -37,8 +38,14 @@ const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
 const DETAIL_MUTED: Color32 = Color32::from_rgb(110, 110, 110);
 /// [v0.1.6] trace_id 色
 const TRACE_FG: Color32 = Color32::from_rgb(0, 120, 160);
+/// [v0.2.0] sparkline 柱色（青蓝，与 TUI Cyan 同心智）
+const SPARK_FG: Color32 = Color32::from_rgb(0, 150, 170);
 /// [v0.1.6] 行详情条总高（头部 1-2 行 + 折行全文滚动区）
 const DETAIL_BAR_H: f32 = 150.0;
+/// [v0.10.10] 分屏两栏间缝隙
+const PANE_GAP: f32 = 10.0;
+/// [v0.2.0] 「复制上下文」按钮携带的行数（同 TUI C 键 ±5）
+const DETAIL_CONTEXT: i64 = 5;
 
 pub struct LogTailApp {
     pub prefs: Prefs,
@@ -86,7 +93,25 @@ impl LogTailApp {
             match ev {
                 StreamEvent::Lines(lines) => {
                     if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
-                        new_lines += t.ingest(lines);
+                        // [v0.2.0] docker 权限拒绝自动提示修复命令（与 TUI drain_session 同文案）
+                        if let TabKind::Remote(r) = &t.kind {
+                            for l in &lines {
+                                if l.contains("permission denied") && l.contains("docker.sock") {
+                                    self.status = format!(
+                                        "⚠ docker 权限拒绝：在服务器上执行 sudo usermod -aG docker {} 后重新连接",
+                                        r.server.user
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        let n = t.ingest(lines);
+                        // [v0.10.8] 倒序暂停钉窗：暂停期间新行从顶部涌入，把正在看的
+                        // 内容往下推——累积行数，渲染层按 row_h 补偿视口后清零
+                        if self.prefs.reverse && !t.follow {
+                            t.pending_top_rows += n;
+                        }
+                        new_lines += n;
                     }
                 }
                 StreamEvent::Ended => {
@@ -195,7 +220,8 @@ impl LogTailApp {
                 id,
                 server: srv.clone(),
                 source: sc.source.clone(),
-                mode: logtail_core::source::ModeVariant::Full,
+                mode: ModeVariant::Full,
+                prefilter: None,
             },
         )));
         self.show_connect = false;
@@ -206,23 +232,140 @@ impl LogTailApp {
         let Some(ti) = self.active_tab_idx() else {
             return;
         };
-        let Some(rc) = (match &self.tabs[ti].kind {
-            TabKind::Remote(r) => Some(crate::pump::RemoteConnect {
-                id: self.tabs[ti].id,
+        // [v0.2.0] 新 id 重连：旧会话迟到的 Lines/Ended 挂在旧 id 上被丢弃，不污染新会话；
+        // mode/远筛取 tab 自身（模式切换、预设、远筛开关都经此重连）
+        let (old_id, rc) = {
+            let t = &mut self.tabs[ti];
+            let TabKind::Remote(r) = &t.kind else {
+                self.status = "本地文件无需重连".into();
+                return;
+            };
+            let old_id = t.id;
+            let new_id = self.next_id;
+            self.next_id += 1;
+            let rc = crate::pump::RemoteConnect {
+                id: new_id,
                 server: r.server.clone(),
                 source: r.source.clone(),
-                mode: logtail_core::source::ModeVariant::Full,
-            }),
-            _ => None,
-        }) else {
-            self.status = "本地文件无需重连".into();
-            return;
+                mode: t.mode.clone(),
+                prefilter: t.remote_prefilter.clone(),
+            };
+            t.id = new_id;
+            t.state = SessionState::Connecting;
+            t.clear();
+            t.follow = true;
+            t.h_scroll_x = 0.0;
+            (old_id, Some(rc))
         };
-        let t = &mut self.tabs[ti];
-        t.state = SessionState::Connecting;
-        t.clear();
+        let Some(rc) = rc else { return };
+        let _ = self.pump.cmd_tx.send(PumpCmd::Stop { id: old_id });
         let _ = self.pump.cmd_tx.send(PumpCmd::ConnectRemote(Box::new(rc)));
         self.status = "重连中…".into();
+    }
+
+    /// [v0.2.0] tab 间循环切换（, 前一个 / . 后一个；Ctrl+Tab / Ctrl+Shift+Tab 同向语义）
+    fn switch_tab(&mut self, delta: isize) {
+        if self.tabs.is_empty() {
+            self.status = "没有已打开的 tab".into();
+            return;
+        }
+        let n = self.tabs.len();
+        let next = ((self.active as isize + delta).rem_euclid(n as isize)) as usize;
+        self.active = next;
+        let title = self.tabs[next].title.clone();
+        self.status = format!("已切换到 {title}（{next}/{n}）");
+    }
+
+    /// [v0.2.0] 预设应用到激活远程 tab（语义同 TUI apply_preset）：
+    /// level 本地过滤立即生效；since 改 tab 模式并重连
+    fn apply_preset_to_active(&mut self, p: Preset) {
+        let Some(ti) = self.active_tab_idx() else {
+            self.status = "先连接一个源再应用预设".into();
+            return;
+        };
+        if !matches!(self.tabs[ti].kind, TabKind::Remote(_)) {
+            self.status = "预设仅适用于远程源（本地文件直接用过滤框）".into();
+            return;
+        }
+        let mut reconnect = false;
+        {
+            let t = &mut self.tabs[ti];
+            if let Some(lf) = p.level {
+                t.level = lf;
+            }
+            if p.since.is_some() {
+                t.mode = ModeVariant::Quick {
+                    since: p.since.clone(),
+                };
+                reconnect = true;
+            }
+        }
+        self.status = format!("预设 [{}]: {}", p.name, self.tabs[ti].mode.label());
+        if reconnect {
+            self.reconnect_active();
+        }
+    }
+
+    /// [v0.2.0] 远程预过滤开关（语义同 TUI P 键）：开 = 校验过滤框 pattern 后随重连生效；
+    /// 关 = 清除并重连恢复全量。本地流不适用；坏 pattern 拒绝且不拼接进命令。
+    fn toggle_prefilter_active(&mut self) {
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        let is_remote = matches!(self.tabs[ti].kind, TabKind::Remote(_));
+        let pat = self.tabs[ti].filter_input.clone();
+        if let Some(old) = self.tabs[ti].remote_prefilter.take() {
+            self.status = format!("远程预过滤已关闭（曾是 {old}），带宽恢复全量");
+            self.reconnect_active();
+            return;
+        }
+        if !is_remote {
+            self.status = "本地流无需远端预过滤：本地过滤即即时生效".into();
+            return;
+        }
+        if pat.is_empty() {
+            self.status = "先在过滤框输入关键词，再开远筛推到远端".into();
+            return;
+        }
+        match check_pattern(&pat) {
+            Ok(()) => {
+                self.tabs[ti].remote_prefilter = Some(pat.clone());
+                self.status = format!("远程预过滤开启: {pat}（远端只回传匹配行；再点关闭）");
+                self.reconnect_active();
+            }
+            Err(e) => self.status = format!("{e}——远筛拒绝该 pattern，未拼接进任何命令"),
+        }
+    }
+
+    /// [v0.2.0] 启动恢复上次激活 tab；remember_last_source=false 或配置加载失败时不恢复
+    fn restore_last_tab(&mut self) {
+        let Some(last) = self.prefs.last_tab.clone() else {
+            return;
+        };
+        let remember = logtail_core::config::load()
+            .map(|c| c.general.remember_last_source)
+            .unwrap_or(false);
+        if !remember {
+            return;
+        }
+        match last {
+            LastTab::Local { path } => {
+                if std::path::Path::new(&path).is_file() {
+                    self.open_local(&path);
+                }
+            }
+            LastTab::Remote { source } => {
+                self.ensure_remote_cfg();
+                let sc = self
+                    .remote_cfg
+                    .as_ref()
+                    .and_then(|c| c.sources.iter().find(|s| s.name == source).cloned());
+                match sc {
+                    Some(sc) => self.open_remote(&sc),
+                    None => self.status = format!("上次的源 {source} 不在 config.toml 里，未自动连接"),
+                }
+            }
+        }
     }
 
     fn export_active(&mut self) {
@@ -288,6 +431,23 @@ impl LogTailApp {
             }
         }
 
+        // [v0.2.0] tab 切换：, 前一个 / . 后一个（TUI 同语义）；Ctrl(+Shift)+Tab 同向
+        let switch = if ctx.input(|i| i.key_pressed(Key::Comma)) {
+            Some(-1)
+        } else if ctx.input(|i| i.key_pressed(Key::Period)) {
+            Some(1)
+        } else if ctx.input(|i| i.key_pressed(Key::Tab) && i.modifiers.ctrl && i.modifiers.shift) {
+            Some(-1)
+        } else if ctx.input(|i| i.key_pressed(Key::Tab) && i.modifiers.ctrl) {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(delta) = switch {
+            self.switch_tab(delta);
+            return;
+        }
+
         // [v0.1.7] 详情条键盘交互（与 TUI 统一）：Enter 开/关 · Esc 关 · ↑↓ 移动选中且详情跟随
         let enter = ctx.input(|i| i.key_pressed(Key::Enter));
         let esc = ctx.input(|i| i.key_pressed(Key::Escape));
@@ -315,11 +475,34 @@ impl LogTailApp {
             return;
         }
         if (up || down) && self.tabs[ti].detail_line.is_some() {
-            let delta = if up { -1 } else { 1 };
+            let mut delta = if up { -1 } else { 1 };
+            // [v0.10.8] 倒序时视觉方向翻转：Down = 视觉向下 = 更旧 = view 下标 -1
+            if self.prefs.reverse {
+                delta = -delta;
+            }
             let t = &mut self.tabs[ti];
             if t.move_selection(delta).is_some() {
                 t.follow = false; // 移动选中即暂停跟随（与 TUI move_selection 同语义）
                 self.status = "↑↓ 移动选中（详情跟随；点「↓ 末尾」恢复跟随）".into();
+            }
+        }
+
+        // [v0.2.0] ←→ 长行横滚（半屏步进，同 TUI）；Home 复位到行首
+        let left = ctx.input(|i| i.key_pressed(Key::ArrowLeft));
+        let right = ctx.input(|i| i.key_pressed(Key::ArrowRight));
+        let home = ctx.input(|i| i.key_pressed(Key::Home));
+        if left || right || home {
+            let t = &mut self.tabs[ti];
+            let step = (t.last_log_width / 2.0).max(80.0);
+            if home {
+                if t.h_scroll_x != 0.0 {
+                    t.h_scroll_x = 0.0;
+                    self.status = "横滚已复位到行首".into();
+                }
+            } else if right {
+                t.h_scroll_x = (t.h_scroll_x + step).min(20_000.0);
+            } else if t.h_scroll_x > 0.0 {
+                t.h_scroll_x = (t.h_scroll_x - step).max(0.0);
             }
         }
     }
@@ -345,6 +528,10 @@ impl eframe::App for LogTailApp {
             for p in files {
                 self.open_local(&p);
             }
+            // [v0.2.0] CLI 没给文件时恢复上次激活 tab（remember_last_source 门控）
+            if self.tabs.is_empty() {
+                self.restore_last_tab();
+            }
             if self.prefs.always_on_top {
                 ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
             }
@@ -367,6 +554,21 @@ impl eframe::App for LogTailApp {
 
         self.pump_events(ctx);
 
+        // [v0.2.0] 激活 tab 变化 → 记入偏好（随去抖落盘，下次启动恢复）
+        let want = self.active_tab_idx().map(|ti| {
+            let t = &self.tabs[ti];
+            match &t.kind {
+                TabKind::Local { path } => LastTab::Local { path: path.clone() },
+                TabKind::Remote(r) => LastTab::Remote {
+                    source: r.source_name.clone(),
+                },
+            }
+        });
+        if self.prefs.last_tab != want {
+            self.prefs.last_tab = want;
+            self.prefs_dirty = true;
+        }
+
         if self.prefs_dirty {
             self.prefs.save();
             self.prefs_dirty = false;
@@ -388,6 +590,7 @@ impl eframe::App for LogTailApp {
         let ctx = ui.ctx().clone();
         self.tab_bar(ui);
         self.toolbar(ui);
+        self.spark_bar(ui);
         self.log_area(ui);
         self.status_bar(ui);
         self.connect_dialog(&ctx);
@@ -481,17 +684,46 @@ impl LogTailApp {
                 let Some(ti) = self.active_tab_idx() else {
                     return;
                 };
-                // 跟随 / 末尾
+                // 跟随 / 末尾 / 倒序（[v0.10.8] 倒序=最新在顶，全局偏好记忆）
                 let mut follow = self.tabs[ti].follow;
                 if ui.checkbox(&mut follow, "跟随").changed() {
                     self.tabs[ti].follow = follow;
                     if follow {
                         self.tabs[ti].jump_to_end = true;
+                        self.tabs[ti].pending_top_rows = 0; // 钉窗补偿作废
                     }
                 }
-                if !follow && ui.button("↓ 末尾").clicked() {
+                let jump_label = if self.prefs.reverse { "↑ 最新" } else { "↓ 末尾" };
+                if !follow && ui.button(jump_label).clicked() {
                     self.tabs[ti].follow = true;
                     self.tabs[ti].jump_to_end = true;
+                    self.tabs[ti].pending_top_rows = 0;
+                }
+                let mut reverse = self.prefs.reverse;
+                if ui.checkbox(&mut reverse, "倒序").changed() {
+                    self.prefs.reverse = reverse;
+                    self.prefs_dirty = true;
+                    // 切换行序后视图翻到另一端，全部 tab 跳到新顺序的最新端
+                    for t in &mut self.tabs {
+                        t.follow = true;
+                        t.jump_to_end = true;
+                        t.pending_top_rows = 0;
+                    }
+                    self.status = if reverse {
+                        "倒序显示：开（最新在顶；跟随=钉住顶部）".into()
+                    } else {
+                        "倒序显示：关（时间正序）".into()
+                    };
+                }
+                // [v0.10.10] 分屏（≥2 个 tab 才可用）：激活 tab 与下一 tab 并排，
+                // 两栏独立滚动/选中/跟随；工具栏与键盘仍作用于激活栏
+                let mut split = self.prefs.split;
+                if ui
+                    .add_enabled(self.tabs.len() >= 2, egui::Checkbox::new(&mut split, "分屏"))
+                    .changed()
+                {
+                    self.prefs.split = split;
+                    self.prefs_dirty = true;
                 }
                 ui.separator();
 
@@ -553,7 +785,80 @@ impl LogTailApp {
                         .send_viewport_cmd(ViewportCommand::WindowLevel(level));
                     self.prefs_dirty = true;
                 }
+                // [v0.2.0] 折叠 ×N / 时间轴开关（持久化到 gui.toml）
+                if ui.checkbox(&mut self.prefs.dedupe, "折叠").changed() {
+                    self.prefs_dirty = true;
+                }
+                if ui.checkbox(&mut self.prefs.show_sparkline, "时间轴").changed() {
+                    self.prefs_dirty = true;
+                }
                 ui.separator();
+
+                // [v0.2.0] 远程专属：模式 / 更早 / 远筛（本地 tab 隐藏这组）
+                if matches!(self.tabs[ti].kind, TabKind::Remote(_)) {
+                    // 模式下拉：改动即重连（命令时间窗变化）
+                    let mut picked_mode: Option<ModeVariant> = None;
+                    egui::ComboBox::from_id_salt(("mode_sel", self.tabs[ti].id))
+                        .selected_text(self.tabs[ti].mode.label())
+                        .width(110.0)
+                        .show_ui(ui, |ui| {
+                            let now = chrono::Utc::now();
+                            let range_1h = ModeVariant::Range(
+                                (now - chrono::Duration::hours(1)).to_rfc3339(),
+                                now.to_rfc3339(),
+                            );
+                            for (m, label) in [
+                                (ModeVariant::Full, "全量"),
+                                (
+                                    ModeVariant::Quick {
+                                        since: Some("1h".into()),
+                                    },
+                                    "快捷(1h)",
+                                ),
+                                (
+                                    ModeVariant::Quick {
+                                        since: Some("24h".into()),
+                                    },
+                                    "快捷(24h)",
+                                ),
+                                (range_1h, "精准(近1h)"),
+                            ] {
+                                let on = m.label() == self.tabs[ti].mode.label();
+                                if ui.selectable_label(on, label).clicked() {
+                                    picked_mode = Some(m);
+                                }
+                            }
+                        });
+                    if let Some(m) = picked_mode {
+                        self.tabs[ti].mode = m;
+                        self.reconnect_active();
+                    }
+                    // 加载更早（同 TUI L 键）：快捷翻倍 / 精准窗口前移 / 全量→24h
+                    if ui.button("⏮ 更早").clicked() {
+                        match next_earlier_mode(&self.tabs[ti].mode) {
+                            Some(m) => {
+                                let label = m.label();
+                                self.tabs[ti].mode = m;
+                                self.reconnect_active();
+                                self.status = format!("加载更早：{label}（重连中）");
+                            }
+                            None => self.status = "当前模式无法前移，请用预设指定时间窗".into(),
+                        }
+                    }
+                    // 远筛开关（同 TUI P 键）
+                    let prefilter_on = self.tabs[ti].remote_prefilter.is_some();
+                    if ui.selectable_label(prefilter_on, "远筛").clicked() {
+                        self.toggle_prefilter_active();
+                    }
+                    if let Some(p) = &self.tabs[ti].remote_prefilter {
+                        ui.label(
+                            RichText::new(format!("远筛:{p}"))
+                                .color(TRACE_FG)
+                                .strong(),
+                        );
+                    }
+                    ui.separator();
+                }
 
                 // 操作
                 if ui.button("清屏").clicked() {
@@ -568,6 +873,40 @@ impl LogTailApp {
                     self.reconnect_active();
                 }
             });
+        });
+    }
+
+    /// [v0.2.0] 日志量时间轴细条（每秒一桶密度矩形，末端=最新；同 TUI sparkline）
+    fn spark_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.prefs.show_sparkline {
+            return;
+        }
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        egui::Panel::top("sparkbar").show(ui, |ui| {
+            let w = ui.available_width();
+            let buckets = ((w / 6.0).floor() as usize).max(10);
+            self.tabs[ti].refresh_spark(buckets);
+            let spark = self.tabs[ti].spark.clone();
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 14.0), Sense::hover());
+            resp.on_hover_text("日志量/秒（末端=最新）");
+            if spark.iter().all(|&c| c == 0) {
+                return;
+            }
+            let max = spark.iter().max().copied().unwrap_or(1).max(1);
+            let bw = w / buckets as f32;
+            for (i, &c) in spark.iter().enumerate() {
+                if c == 0 {
+                    continue;
+                }
+                let h = 2.0 + (c as f32 / max as f32) * (r.height() - 2.0);
+                let br = egui::Rect::from_min_size(
+                    egui::pos2(r.left() + i as f32 * bw, r.bottom() - h),
+                    egui::vec2((bw - 1.0).max(1.0), h),
+                );
+                ui.painter().rect_filled(br, 0.0, SPARK_FG);
+            }
         });
     }
 
@@ -587,182 +926,43 @@ impl LogTailApp {
 
             // 行间零缝隙
             ui.spacing_mut().item_spacing.y = 0.0;
-            let (row_h, font_size, follow, jump, prev_inner_h) = {
-                let tab = &mut self.tabs[ti];
-                tab.ensure_view();
-                let fs = self.prefs.font_size;
-                (fs * 1.5, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
-            };
-            let fm = self.tabs[ti].active_filter();
-            let n = self.tabs[ti].view.len();
-            // [v0.1.6] 行详情条（开时占底部一块，日志区让位）；行高恒定 → 总高 = n×row_h
+            let dedupe = self.prefs.dedupe;
+            let reverse = self.prefs.reverse; // [v0.10.8] 倒序显示（最新在顶）
+            // [v0.1.6] 行详情条（开时占底部一块，日志区让位；分屏时两栏同步让位对齐）
             let bar_h = if self.tabs[ti].detail_line.is_some() {
                 DETAIL_BAR_H
             } else {
                 0.0
             };
             let avail = ui.available_rect_before_wrap();
-            let log_h = (avail.height() - bar_h).max(60.0);
-            // 精确跳底落点：content 总高 - 视口高
-            let jump_offset = (n as f32 * row_h - prev_inner_h).max(0.0);
-
-            let mut copy_line: Option<String> = None;
-            let mut filter_trace: Option<String> = None;
-            let id = self.tabs[ti].id;
-
-            // [v0.1.7] 详情条跟随滚动：↑↓ 移动选中后，把该行带进视口（一次性偏移）
-            let mut force_offset: Option<f32> = None;
-            {
-                let tab = &mut self.tabs[ti];
-                if let Some(no) = tab.scroll_to_line.take()
-                    && let Ok(idx) = tab.view.binary_search(&no)
-                {
-                    let y0 = idx as f32 * row_h;
-                    let y1 = y0 + row_h;
-                    let off = tab.last_scroll_offset;
-                    let inner = tab.last_inner_h.max(1.0);
-                    if y0 < off {
-                        force_offset = Some(y0);
-                    } else if y1 > off + inner {
-                        force_offset = Some((y1 - inner).max(0.0));
-                    }
-                }
-            }
-
-            let mut sa = ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .id_salt(("logrows", id))
-                .stick_to_bottom(follow && force_offset.is_none());
-            if jump {
-                sa = sa.vertical_scroll_offset(jump_offset);
-            }
-            if let Some(off) = force_offset {
-                sa = sa.vertical_scroll_offset(off);
-            }
-            let tab = &mut self.tabs[ti];
-            // [v0.1.6] 行高恒定 → show_rows 虚拟化（变高行前缀和机制随主视图撤换行而删除）；
-            // 日志区 = 可用高 - 详情条高
-            let out = ui
-                .allocate_ui(egui::vec2(avail.width(), log_h), |ui| {
-                    sa.show_rows(ui, row_h, n, |ui, rows| {
-                        for i in rows {
-                            let Some(&no) = tab.view.get(i) else { continue };
-                            let Some((raw, level, ts, trace)) = tab
-                                .buffer
-                                .by_line_no(no)
-                                .map(|l| (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone()))
-                            else {
-                                continue;
-                            };
-                            let hit = raw_hits(&raw, fm.as_ref());
-                            let selected = tab.selected == Some(no);
-                            let rect = egui::Rect::from_min_size(
-                                ui.cursor().left_top(),
-                                egui::vec2(ui.available_width(), row_h),
-                            );
-
-                            let bg = if selected {
-                                SEL_BG
-                            } else if hit {
-                                HIT_BG
-                            } else {
-                                LOG_BG
-                            };
-                            ui.painter().rect_filled(rect, 0.0, bg);
-
-                            let color = level_color(level);
-                            // [v0.1.6] 主视图固定单行（layout_no_wrap）：超出由 ScrollArea 裁剪，长行全文看详情条
-                            let galley = ui.painter().layout_no_wrap(
-                                raw.clone(),
-                                egui::FontId::monospace(font_size),
-                                color,
-                            );
-                            ui.painter().galley(
-                                egui::pos2(rect.left() + 3.0, rect.top() + 2.0),
-                                galley,
-                                color,
-                            );
-
-                            let resp = ui.allocate_rect(rect, Sense::click());
-                            // 单击=选起点；Shift+单击=扩成区间；双击=打开行详情条
-                            if resp.double_clicked() {
-                                tab.detail_line = Some(no);
-                            }
-                            if resp.clicked() {
-                                let shift = ui.input(|i| i.modifiers.shift);
-                                if shift && tab.selected.is_some() {
-                                    tab.sel_focus = Some(no);
-                                } else {
-                                    tab.selected = Some(no);
-                                    tab.sel_focus = None;
-                                }
-                            }
-                            resp.context_menu(|ui| {
-                                if ui.button("查看完整行").clicked() {
-                                    tab.detail_line = Some(no);
-                                    ui.close();
-                                }
-                                if ui.button("复制该行").clicked() {
-                                    copy_line = Some(raw.clone());
-                                    ui.close();
-                                }
-                                let n = tab.range_count().unwrap_or(1);
-                                if n > 1 && ui.button(format!("复制选中 {n} 行")).clicked() {
-                                    if let Some(text) = tab.copy_text() {
-                                        copy_line = Some(text);
-                                    }
-                                    ui.close();
-                                }
-                                if let Some(ts) = ts
-                                    && ui.button("复制时间戳").clicked()
-                                {
-                                    copy_line = Some(ts.to_rfc3339());
-                                    ui.close();
-                                }
-                                if let Some(tid) = &trace
-                                    && ui.button("复制 trace_id").clicked()
-                                {
-                                    copy_line = Some(tid.clone());
-                                    ui.close();
-                                }
-                                if let Some(tid) = &trace
-                                    && ui.button("按 trace_id 过滤").clicked()
-                                {
-                                    filter_trace = Some(tid.clone());
-                                    ui.close();
-                                }
-                            });
-                        }
-                    })
-                })
-                .inner;
-
-            // ---- 跟随状态机 ----
-            let inner_h = out.inner_rect.height();
-            let max_off = (out.content_size.y - inner_h).max(0.0);
-            let at_bottom = out.state.clamped_offset().y >= max_off - 2.0;
-            let tab = &mut self.tabs[ti];
-            tab.last_inner_h = inner_h;
-            tab.last_scroll_offset = out.state.clamped_offset().y; // [v0.1.7] 详情跟随的可见性基准
-            if let Some(text) = copy_line {
-                ui.ctx().copy_text(text);
-                self.status = "已复制".into();
-            }
-            if let Some(tid) = filter_trace {
-                tab.filter_input = tid;
-                tab.clear_selection();
-                self.status = "按 trace 过滤".into();
-            }
-            if follow && !at_bottom {
-                // 用户滚离底部 → 暂停跟随（BareTail 行为）
-                tab.follow = false;
-                self.status = format!("{}：已暂停跟随（滚回底部或点「↓ 末尾」恢复）", tab.title);
-            } else if !follow && at_bottom && max_off > 0.0 {
-                // 滚回底部 → 恢复跟随
-                tab.follow = true;
-            }
-            if jump && at_bottom {
-                tab.jump_to_end = false; // 到位即收；未到位（新行涌入/尺寸变化）下一帧按新参数重试
+            // [v0.10.8] 本帧用户滚轮输入（倒序钉顶让路判定用；egui 0.37 滚轮输入
+            // 汇总在 smooth_scroll_delta，ScrollArea 消费后会清零）
+            let user_scroll_y = ui.input(|i| i.smooth_scroll_delta.y != 0.0);
+            // [v0.10.10] 分屏：激活 tab 在左、下一个 tab（循环）在右，两栏各自完整
+            // 交互（滚动/选中/跟随/右键逐栏独立）；过滤/级别/详情条/键盘归属激活栏。
+            // [v0.10.10 修复] 窗格必须用绝对坐标 scope_builder 创建——不能包在
+            // ui.horizontal 里：egui 0.37 的 ScrollArea 双阶段布局在 horizontal
+            // 子 Ui 中裁剪/坐标错位，行内容会画到面板外（真机验证：文字整块消失）
+            let split_on = self.prefs.split && self.tabs.len() >= 2;
+            if split_on {
+                let half_w = ((avail.width() - PANE_GAP) / 2.0).max(120.0);
+                let pane_h = (avail.height() - bar_h).max(60.0);
+                let left = egui::Rect::from_min_size(avail.left_top(), egui::vec2(half_w, pane_h));
+                let right = egui::Rect::from_min_size(
+                    egui::pos2(avail.left() + half_w + PANE_GAP, avail.top()),
+                    egui::vec2(half_w, pane_h),
+                );
+                let size = egui::vec2(half_w, pane_h);
+                let other = split_other_idx(ti, self.tabs.len());
+                let _ = ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| {
+                    self.draw_log_pane(ui, ti, true, true, size, reverse, dedupe, user_scroll_y)
+                });
+                let _ = ui.scope_builder(egui::UiBuilder::new().max_rect(right), |ui| {
+                    self.draw_log_pane(ui, other, false, true, size, reverse, dedupe, user_scroll_y)
+                });
+            } else {
+                let size = egui::vec2(avail.width(), (avail.height() - bar_h).max(60.0));
+                self.draw_log_pane(ui, ti, true, false, size, reverse, dedupe, user_scroll_y);
             }
 
             // ---- 行详情条（v0.1.6）：双击行/右键打开，egui 真实像素折行，长行全文可读 ----
@@ -803,6 +1003,16 @@ impl LogTailApp {
                             if ui.small_button("关闭").clicked() {
                                 self.tabs[ti].detail_line = None;
                             }
+                            if ui.small_button("复制上下文").clicked() {
+                                // [v0.2.0] 同 TUI C 键：±5 行带走现场（淘汰行跳过）
+                                match self.tabs[ti].context_text(no, DETAIL_CONTEXT as u64) {
+                                    Some(text) => {
+                                        ui.ctx().copy_text(text);
+                                        self.status = format!("已复制上下文 ±{DETAIL_CONTEXT}");
+                                    }
+                                    None => self.status = "上下文行已被缓冲淘汰".into(),
+                                }
+                            }
                             if ui.small_button("复制该行").clicked() {
                                 ui.ctx().copy_text(raw.clone());
                                 self.status = "已复制".into();
@@ -811,6 +1021,8 @@ impl LogTailApp {
                         });
                     });
                     ui.separator();
+                    // 详情只显示当前行（v0.10.6 两端统一语义：±N 上下文展示已撤，
+                    // 带走现场用「复制上下文」按钮，同 TUI C 键）
                     egui::ScrollArea::vertical()
                         .max_height((bar_h - 64.0).max(40.0))
                         .id_salt(("detailbar", self.tabs[ti].id))
@@ -827,6 +1039,261 @@ impl LogTailApp {
         });
     }
 
+    /// [v0.10.10] 单栏日志渲染（单栏/分屏两栏共用）：视图重建 → 栏头（分屏时）→
+    /// ScrollArea 行渲染/交互 → 跟随状态机。两栏各自跑同一套逻辑，逐栏独立的是
+    /// 滚动/选中/跟随/右键；过滤/级别/详情条/键盘导航仍归属激活栏（log_area 外层）。
+    /// 跟随自动暂停/恢复的状态栏提示仅焦点栏写（避免两栏互相覆盖）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_log_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        ti: usize,
+        focused: bool,
+        show_header: bool,
+        size: egui::Vec2,
+        reverse: bool,
+        dedupe: bool,
+        user_scroll_y: bool,
+    ) {
+        // 栏头占用的实际高度从内容高里扣掉，否则窗格内容超出分配盒
+        // （首帧定位/跳底/滚动条都会随之错位）
+        let head_h = if show_header {
+            let top0 = ui.cursor().top();
+            let title = self.tabs[ti].title.clone();
+            let follow_now = self.tabs[ti].follow;
+            let head = format!(
+                "[{title}] {}",
+                if follow_now { "● 跟随" } else { "‖ 暂停" }
+            );
+            ui.horizontal(|ui| {
+                ui.set_min_height(18.0);
+                let text = if focused {
+                    RichText::new(&head).strong()
+                } else {
+                    RichText::new(&head).weak()
+                };
+                ui.label(text);
+            });
+            ui.cursor().top() - top0
+        } else {
+            0.0
+        };
+        let content_size = egui::vec2(size.x, (size.y - head_h).max(60.0));
+        let (row_h, font_size, follow, jump, prev_inner_h) = {
+            let tab = &mut self.tabs[ti];
+            tab.ensure_view(dedupe);
+            let fs = self.prefs.font_size;
+            (fs * 1.5, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
+        };
+        let fm = self.tabs[ti].active_filter();
+        let n = self.tabs[ti].display.len();
+        self.tabs[ti].last_log_width = size.x; // [v0.2.0] 横滚半屏步长基准
+        // 精确跳底落点：content 总高 - 视口高；[v0.10.8] 倒序跳「最新」= 顶部（0）
+        let jump_offset = if reverse {
+            0.0
+        } else {
+            (n as f32 * row_h - prev_inner_h).max(0.0)
+        };
+
+        let mut copy_line: Option<String> = None;
+        let mut filter_trace: Option<String> = None;
+        let id = self.tabs[ti].id;
+
+        // [v0.1.7] 详情条跟随滚动：↑↓ 移动选中后，把该行带进视口（一次性偏移）
+        // [v0.2.0] 定位基准改为 display（折叠后行号 = 显示行号）
+        let mut force_offset: Option<f32> = None;
+        {
+            let tab = &mut self.tabs[ti];
+            // [v0.10.8] 倒序暂停钉窗：暂停期间新行从顶部涌入（display 头部插入），
+            // 正在看的内容被推下 pending×row_h——把视口下移同量钉住，随后清零
+            if reverse && !tab.follow && tab.pending_top_rows > 0 {
+                force_offset = Some(tab.last_scroll_offset + tab.pending_top_rows as f32 * row_h);
+                tab.pending_top_rows = 0;
+            }
+            if let Some(no) = tab.scroll_to_line.take()
+                && let Some(idx) = tab.display_row_of(no)
+            {
+                // [v0.10.8] 倒序：display 下标 → 视觉行（display 升序，视觉反转）
+                let vis_row = if reverse { n - 1 - idx } else { idx };
+                let y0 = vis_row as f32 * row_h;
+                let y1 = y0 + row_h;
+                let off = tab.last_scroll_offset;
+                let inner = tab.last_inner_h.max(1.0);
+                if y0 < off {
+                    force_offset = Some(y0);
+                } else if y1 > off + inner {
+                    force_offset = Some((y1 - inner).max(0.0));
+                }
+            }
+        }
+
+        let mut sa = ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .id_salt(("logrows", id))
+            .stick_to_bottom(follow && !reverse && force_offset.is_none());
+        if jump {
+            sa = sa.vertical_scroll_offset(jump_offset);
+        }
+        // [v0.10.8] 倒序跟随 = 钉顶（offset 0：新行从顶部涌入自然推旧行下移）。
+        // 正序的 stick_to_bottom 由 egui 在用户滚离底部时自动失效
+        // （scroll_stuck_to_end 随 offset 偏离末端翻转）；顶部钉住需自行让路——
+        // 本帧有滚轮输入时不强制，用户才能滚离顶部触发自动暂停
+        if reverse && follow && force_offset.is_none() && !user_scroll_y {
+            sa = sa.vertical_scroll_offset(0.0);
+        }
+        if let Some(off) = force_offset {
+            sa = sa.vertical_scroll_offset(off);
+        }
+        let tab = &mut self.tabs[ti];
+        // [v0.1.6] 行高恒定 → show_rows 虚拟化；size.y 已为日志区让出详情条高度
+        let out = ui
+            .allocate_ui(content_size, |ui| {
+                sa.show_rows(ui, row_h, n, |ui, rows| {
+                    for i in rows {
+                        // [v0.2.0] 渲染走折叠显示列表 display：(代表行, 组内行数)
+                        // [v0.10.8] 倒序：display 仍升序（line_no），渲染行序反转
+                        // （最新在顶）；dedupe 组为 display 单元整体换位，
+                        // 选中/右键/复制全按 line_no，不受行序影响
+                        let di = if reverse { n - 1 - i } else { i };
+                        let Some(&(no, group_n)) = tab.display.get(di) else { continue };
+                        let Some((raw, level, ts, trace)) = tab
+                            .buffer
+                            .by_line_no(no)
+                            .map(|l| (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone()))
+                        else {
+                            continue;
+                        };
+                        let hit = raw_hits(&raw, fm.as_ref());
+                        let selected = tab.selected == Some(no);
+                        let rect = egui::Rect::from_min_size(
+                            ui.cursor().left_top(),
+                            egui::vec2(ui.available_width(), row_h),
+                        );
+                        let bg = if selected {
+                            SEL_BG
+                        } else if hit {
+                            HIT_BG
+                        } else {
+                            LOG_BG
+                        };
+                        ui.painter().rect_filled(rect, 0.0, bg);
+
+                        let color = level_color(level);
+                        // [v0.2.0] 折叠组行尾 ×N；←→ 横滚整体平移（主视图仍单行裁剪，
+                        // 超出由 ScrollArea 裁剪，长行全文看详情条）
+                        let text = if group_n > 1 {
+                            format!("{raw}  ×{group_n}")
+                        } else {
+                            raw.clone()
+                        };
+                        let galley = ui.painter().layout_no_wrap(
+                            text,
+                            egui::FontId::monospace(font_size),
+                            color,
+                        );
+                        ui.painter().galley(
+                            egui::pos2(rect.left() + 3.0 - tab.h_scroll_x, rect.top() + 2.0),
+                            galley,
+                            color,
+                        );
+
+                        let resp = ui.allocate_rect(rect, Sense::click());
+                        // 单击=选起点；Shift+单击=扩成区间；双击=打开行详情条
+                        if resp.double_clicked() {
+                            tab.detail_line = Some(no);
+                        }
+                        if resp.clicked() {
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if shift && tab.selected.is_some() {
+                                tab.sel_focus = Some(no);
+                            } else {
+                                tab.selected = Some(no);
+                                tab.sel_focus = None;
+                            }
+                        }
+                        resp.context_menu(|ui| {
+                            if ui.button("查看完整行").clicked() {
+                                tab.detail_line = Some(no);
+                                ui.close();
+                            }
+                            if ui.button("复制该行").clicked() {
+                                copy_line = Some(raw.clone());
+                                ui.close();
+                            }
+                            let n = tab.range_count().unwrap_or(1);
+                            if n > 1 && ui.button(format!("复制选中 {n} 行")).clicked() {
+                                if let Some(text) = tab.copy_text() {
+                                    copy_line = Some(text);
+                                }
+                                ui.close();
+                            }
+                            if let Some(ts) = ts
+                                && ui.button("复制时间戳").clicked()
+                            {
+                                copy_line = Some(ts.to_rfc3339());
+                                ui.close();
+                            }
+                            if let Some(tid) = &trace
+                                && ui.button("复制 trace_id").clicked()
+                            {
+                                copy_line = Some(tid.clone());
+                                ui.close();
+                            }
+                            if let Some(tid) = &trace
+                                && ui.button("按 trace_id 过滤").clicked()
+                            {
+                                filter_trace = Some(tid.clone());
+                                ui.close();
+                            }
+                        });
+                    }
+                })
+            })
+            .inner;
+
+        // ---- 跟随状态机 ----
+        let inner_h = out.inner_rect.height();
+        let max_off = (out.content_size.y - inner_h).max(0.0);
+        let at_bottom = out.state.clamped_offset().y >= max_off - 2.0;
+        // [v0.10.8] 倒序「最新端」= 顶部：跟随=钉顶，暂停/恢复以是否在顶判定
+        let at_edge = if reverse {
+            out.state.clamped_offset().y <= 2.0
+        } else {
+            at_bottom
+        };
+        let tab = &mut self.tabs[ti];
+        tab.last_inner_h = inner_h;
+        tab.last_scroll_offset = out.state.clamped_offset().y; // [v0.1.7] 详情跟随的可见性基准
+        if let Some(text) = copy_line {
+            ui.ctx().copy_text(text);
+            self.status = "已复制".into();
+        }
+        if let Some(tid) = filter_trace {
+            tab.filter_input = tid;
+            tab.clear_selection();
+            self.status = "按 trace 过滤".into();
+        }
+        if follow && !at_edge {
+            // 用户滚离最新端 → 暂停跟随（BareTail 行为；倒序=滚离顶部）；
+            // [v0.10.10] 副栏静默暂停（状态栏只反映焦点栏，避免两栏互相覆盖提示）
+            tab.follow = false;
+            if focused {
+                self.status = if reverse {
+                    format!("{}：已暂停跟随（滚回顶部或点「↑ 最新」恢复）", tab.title)
+                } else {
+                    format!("{}：已暂停跟随（滚回底部或点「↓ 末尾」恢复）", tab.title)
+                };
+            }
+        } else if !follow && at_edge && max_off > 0.0 {
+            // 滚回最新端 → 恢复跟随（倒序=滚回顶部；钉窗补偿随之作废）
+            tab.follow = true;
+            tab.pending_top_rows = 0;
+        }
+        if jump && at_edge {
+            tab.jump_to_end = false; // 到位即收；未到位（新行涌入/尺寸变化）下一帧按新参数重试
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::bottom("statusbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -834,18 +1301,27 @@ impl LogTailApp {
                     ui.label("就绪");
                     return;
                 };
-                let (title, total, hits, state_label, follow, size_mb, is_local, path, server_name) = {
+                let (title, total, hits, state_label, follow, size_mb, is_local, path, server_name, mode_label, prefilter) = {
                     let t = &mut self.tabs[ti];
-                    t.ensure_view();
+                    let dedupe = self.prefs.dedupe;
+                    t.ensure_view(dedupe);
                     let state_label = match t.state {
                         SessionState::Connecting => "连接中",
                         SessionState::Streaming => "流式中",
                         SessionState::Ended => "已结束",
                         SessionState::Failed => "失败",
                     };
-                    let (is_local, path, server_name) = match &t.kind {
-                        TabKind::Local { path } => (true, Some(path.clone()), String::new()),
-                        TabKind::Remote(r) => (false, None, r.server_name.clone()),
+                    let (is_local, path, server_name, mode_label, prefilter) = match &t.kind {
+                        TabKind::Local { path } => {
+                            (true, Some(path.clone()), String::new(), String::new(), None)
+                        }
+                        TabKind::Remote(r) => (
+                            false,
+                            None,
+                            r.server_name.clone(),
+                            t.mode.label(),
+                            t.remote_prefilter.clone(),
+                        ),
                     };
                     (
                         t.title.clone(),
@@ -857,6 +1333,8 @@ impl LogTailApp {
                         is_local,
                         path,
                         server_name,
+                        mode_label,
+                        prefilter,
                     )
                 };
                 if is_local
@@ -878,6 +1356,13 @@ impl LogTailApp {
                 ui.label(format!(
                     "{title_part} · {total} 行 · 匹配 {hits}/{total}{size_part} · {state_label}"
                 ));
+                // [v0.2.0] 远程 tab 显示模式与远筛指示（同 TUI 工具栏状态）
+                if !mode_label.is_empty() {
+                    ui.label(RichText::new(format!("模式:{mode_label}")).weak());
+                }
+                if let Some(p) = &prefilter {
+                    ui.label(RichText::new(format!("远筛:{p}")).color(TRACE_FG).strong());
+                }
                 if !follow {
                     ui.label(RichText::new("‖ 已暂停").color(WARN_FG));
                 }
@@ -900,6 +1385,7 @@ impl LogTailApp {
         let cfg = self.remote_cfg.clone();
         let err = self.remote_cfg_err.clone();
         let mut picked: Option<SourceConfig> = None;
+        let mut picked_preset: Option<Preset> = None;
         egui::Window::new("连接远程源")
             .open(&mut self.show_connect)
             .default_width(560.0)
@@ -961,8 +1447,38 @@ impl LogTailApp {
                                 };
                             });
                         }
+
+                        // [v0.2.0] 预设区：一键给当前远程 tab 应用 level+since（同 TUI 侧栏预设）
+                        if !cfg.presets.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("预设（应用到当前远程 tab）").strong());
+                            for (key, pc) in &cfg.presets {
+                                let p = pc.to_preset(key);
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("应用").clicked() {
+                                        picked_preset = Some(p.clone());
+                                    }
+                                    let mut parts = Vec::new();
+                                    if let Some(lf) = p.level {
+                                        parts.push(lf.label().trim().to_string());
+                                    }
+                                    if let Some(s) = &p.since {
+                                        parts.push(format!("近 {s}"));
+                                    }
+                                    let desc = if parts.is_empty() {
+                                        p.key.clone()
+                                    } else {
+                                        format!("{} · {}", p.name, parts.join("，"))
+                                    };
+                                    ui.label(format!("⚡ {desc}"));
+                                });
+                            }
+                        }
                     });
             });
+        if let Some(p) = picked_preset {
+            self.apply_preset_to_active(p);
+        }
         if let Some(sc) = picked {
             self.open_remote(&sc);
         }

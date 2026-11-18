@@ -15,6 +15,9 @@ pub enum LogtailError {
     ExecFailed(String),
     #[error("配置加载失败: {0}")]
     ConfigError(String),
+    /// [v0.10.9] 系统密钥环读写失败（Keyring 认证 §16.3）
+    #[error("密钥环: {0}")]
+    Keyring(String),
     #[error("正则编译错误: {0}")]
     RegexError(String),
     /// [v0.3 P1#3] 白名单拒绝，不做"转义放行"

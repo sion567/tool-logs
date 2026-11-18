@@ -162,6 +162,45 @@ impl ModeVariant {
     }
 }
 
+// [v0.10 core 化] L 键"加载更早"的前移规则（原 TUI app.rs，纯函数两前端共用）：
+/// Full → 回放 24h；Quick 时长翻倍；Range 窗口向过去平移一个窗口宽度。无法前移 → None。
+pub fn next_earlier_mode(mode: &ModeVariant) -> Option<ModeVariant> {
+    match mode {
+        ModeVariant::Full => Some(ModeVariant::Quick {
+            since: Some("24h".into()),
+        }),
+        ModeVariant::Quick { since } => match since.as_deref() {
+            Some(s) => double_duration(s).map(|d| ModeVariant::Quick { since: Some(d) }),
+            None => Some(ModeVariant::Quick {
+                since: Some("24h".into()),
+            }),
+        },
+        // Range(s,u)：窗口向过去平移一个窗口宽度（u 不动，s 前移 Δ）
+        ModeVariant::Range(s, u) => extend_range(s, u),
+    }
+}
+
+/// "1h" → "2h"；"3d" → "6d"；未知格式 → None
+fn double_duration(s: &str) -> Option<String> {
+    let re = regex::Regex::new(r"^(\d+)([hmd])$").unwrap();
+    let caps = re.captures(s)?;
+    let n: u64 = caps[1].parse().ok()?;
+    Some(format!("{}{}", n.saturating_mul(2), &caps[2]))
+}
+
+/// Range 窗口前移：s 前移 (u-s) 的时长
+fn extend_range(s: &str, u: &str) -> Option<ModeVariant> {
+    use chrono::DateTime;
+    let s_t = DateTime::parse_from_rfc3339(s).ok()?;
+    let u_t = DateTime::parse_from_rfc3339(u).ok()?;
+    let delta = u_t - s_t;
+    if delta <= chrono::Duration::zero() {
+        return None;
+    }
+    let new_s = s_t - delta;
+    Some(ModeVariant::Range(new_s.to_rfc3339(), u.to_string()))
+}
+
 /// 预设（§10 [v0.4 三轮]）：把 level + since 打包成一次按键，作用于当前激活源。
 /// level 是本地过滤（立即生效、不重连）；since 会改命令，必须走重连——
 /// 与 R 完全同一条路径。apply 只改状态，重连由调用方（main_loop 的 pending_action）执行。
@@ -409,5 +448,43 @@ mod tests {
         assert!(!cmd.contains(" -f"), "{cmd}");
         assert!(cmd.contains("--since") && cmd.contains("--until"), "{cmd}");
         assert!(cmd.contains("my-app"), "{cmd}");
+    }
+
+    #[test]
+    fn 加载更早_三种模式的前移规则() {
+        use chrono::DateTime;
+        // Full → Quick(24h)
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Full),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
+        ));
+        // Quick 翻倍
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Quick {
+                since: Some("1h".into())
+            }),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "2h"
+        ));
+        assert!(matches!(
+            next_earlier_mode(&ModeVariant::Quick { since: None }),
+            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
+        ));
+        // Range：窗口向过去平移一个窗口宽度
+        let m = next_earlier_mode(&ModeVariant::Range(
+            "2026-11-04T02:00:00+00:00".into(),
+            "2026-11-04T03:00:00+00:00".into(),
+        ));
+        match m {
+            Some(ModeVariant::Range(s, u)) => {
+                assert_eq!(u, "2026-11-04T03:00:00+00:00", "u 不动");
+                let s_t = DateTime::parse_from_rfc3339(&s).unwrap();
+                assert_eq!(
+                    s_t,
+                    DateTime::parse_from_rfc3339("2026-11-04T01:00:00+00:00").unwrap(),
+                    "s 前移一个窗口宽度"
+                );
+            }
+            other => panic!("应为 Range，实际 {other:?}"),
+        }
     }
 }

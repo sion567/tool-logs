@@ -117,6 +117,14 @@ pub async fn connect_with(
                 .await
                 .map_err(|e| LogtailError::AuthFailed(format!("{user}@{host}: {e}")))?
         }
+        // [v0.10.9] Keyring 认证应在连接前经 ServerConfig::resolved_auth 解析成
+        // Password——直连到此属调用方遗漏，给明确报错而不是吞掉
+        AuthCfg::Keyring { .. } => {
+            return Err(LogtailError::AuthFailed(format!(
+                "{user}@{host}: Keyring 认证未解析（应先调 ServerConfig::resolved_auth）"
+            ))
+            .into())
+        }
     };
     if !ok {
         return Err(LogtailError::AuthFailed(format!("{user}@{host} 认证被拒绝")).into());

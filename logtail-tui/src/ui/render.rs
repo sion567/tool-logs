@@ -52,9 +52,6 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     // [v0.4 P1#6] has_detail 从状态取
     let out = layout(area, st.detail_panel.is_some(), &st.ui);
 
-    // 日志区高度记录给输入层（↑↓ 保证选中行可见需要知道窗口大小）
-    st.viewport.height = out.log.height;
-
     // [v0.4 P2#2] 命中缓存：仅 last_rebuild 变化（入行/过滤变更）才全量重扫，其余帧直接复用
     if st.view_cache.built_at != st.last_rebuild {
         let mut hits = rebuild_view(st.current_buffer(), st.active_filter(), st.level_filter);
@@ -75,6 +72,29 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
             spark,
         };
     }
+    // [v0.10.10] 分屏副栏命中缓存：过滤/级别/折叠两栏共享，逐栏独立的是源/清屏标记
+    // （副栏不需要 spark——时间轴只反映焦点栏）
+    let fm = st.active_filter().clone();
+    let level = st.level_filter;
+    if let Some(sp) = st.split.as_mut() {
+        if sp.bg.view_cache.built_at != st.last_rebuild {
+            let mut hits = sp
+                .bg
+                .source
+                .as_ref()
+                .and_then(|sid| st.buffers.get(sid))
+                .map(|buf| rebuild_view(buf, &fm, level))
+                .unwrap_or_default();
+            if let Some(cut) = sp.bg.cleared_before {
+                hits.retain(|&no| no > cut);
+            }
+            sp.bg.view_cache = crate::app::ViewCache {
+                built_at: st.last_rebuild,
+                hits,
+                spark: Vec::new(),
+            };
+        }
+    }
 
     render_title(frame, out.title, st);
     // [v0.9] 侧栏/sparkline 可隐藏（b/v 热键）
@@ -85,13 +105,103 @@ pub fn render(frame: &mut Frame, st: &mut AppState) {
     if st.ui.show_sparkline {
         render_sparkline(frame, out.spark, st); // [v0.7.6→v0.8.4 恢复] 日志量时间轴
     }
-    render_logs(frame, out.log, st);
+    // [v0.10.10] 分屏：单栏 = 焦点栏占满日志区；双栏 = split_log 对半 + 每栏栏头
+    match st.split.as_ref() {
+        None => {
+            // 日志区高度记录给输入层（↑↓ 保证选中行可见需要知道窗口大小）
+            st.viewport.height = out.log.height;
+            render_logs(frame, out.log, st, focused_pane(st));
+        }
+        Some(sp) => {
+            let (a, b) = crate::ui::layout::split_log(out.log);
+            let (focused_rect, bg_rect) = if sp.bg_left { (b, a) } else { (a, b) };
+            let focused_rows = pane_rows(focused_rect);
+            // 焦点栏行数记给输入层（↑↓/PageUp 可见性计算基准）
+            st.viewport.height = focused_rows.height;
+            draw_pane_header(frame, focused_rect, st.active_source.as_deref(), st.following, true);
+            draw_pane_header(frame, bg_rect, sp.bg.source.as_deref(), sp.bg.following, false);
+            let bg_rows = pane_rows(bg_rect);
+            if sp.bg.source.is_none() {
+                // 未连接占位：引导文案（连接永远进焦点栏——先 n 换焦点再连接）
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::from("副栏未连接"),
+                        Line::from(Span::styled(
+                            "n 换焦点到此栏 → Tab 进侧栏选源回车",
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    ]),
+                    bg_rows,
+                );
+            } else {
+                render_logs(frame, bg_rows, st, bg_pane(sp));
+            }
+            render_logs(frame, focused_rows, st, focused_pane(st));
+        }
+    }
 
     // 详情面板（Day6→v0.10.6）：时间/级别/源/原始行/trace_id——只显示当前行（±N 上下文撤销）
     if let (Some(rect), Some(panel)) = (out.detail, st.detail_panel.clone()) {
         render_detail(frame, rect, st, &panel);
     }
     render_statusbar(frame, out.statusbar, st);
+}
+
+/// [v0.10.10] 栏头占 1 行，其余给日志行
+fn pane_rows(rect: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    ratatui::layout::Rect {
+        x: rect.x,
+        y: rect.y + 1,
+        width: rect.width,
+        height: rect.height.saturating_sub(1),
+    }
+}
+
+/// [v0.10.10] 分屏栏头：`[源名] ● 跟随/‖ 暂停`；焦点栏蓝底反白，副栏暗灰
+/// （符号沿用工具栏既有 ●/‖——均已真机验证无错位）
+fn draw_pane_header(
+    frame: &mut Frame,
+    rect: ratatui::layout::Rect,
+    source: Option<&str>,
+    following: bool,
+    focused: bool,
+) {
+    let name = source.unwrap_or("未连接");
+    let state = if following { "● 跟随" } else { "‖ 暂停" };
+    let mut style = if focused {
+        Style::default().bg(Color::Blue).fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    if focused {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    let line = Line::from(Span::styled(format!("[{name}] {state}"), style));
+    frame.render_widget(Paragraph::new(line), rect);
+}
+
+/// [v0.10.10] 焦点栏渲染视图：复用既有全局字段（键盘层/连接层天然作用于焦点栏）
+fn focused_pane(st: &AppState) -> PaneView<'_> {
+    PaneView {
+        source: st.active_source.as_deref(),
+        cache: &st.view_cache,
+        following: st.following,
+        scroll_y: st.viewport.scroll_y,
+        scroll_x: st.viewport.scroll_x,
+        selected: st.selected_line_no,
+    }
+}
+
+/// [v0.10.10] 副栏渲染视图：来自 SplitView.bg
+fn bg_pane(sp: &crate::app::SplitView) -> PaneView<'_> {
+    PaneView {
+        source: sp.bg.source.as_deref(),
+        cache: &sp.bg.view_cache,
+        following: sp.bg.following,
+        scroll_y: sp.bg.scroll_y,
+        scroll_x: sp.bg.scroll_x,
+        selected: sp.bg.selected_line_no,
+    }
 }
 
 fn render_title(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
@@ -270,98 +380,107 @@ fn render_sparkline(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppStat
     );
 }
 
-fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
-    let visible = st.viewport.height as usize;
+/// [v0.10.10] 分屏渲染视图（借用，不拥有数据）：焦点栏由既有全局字段构造
+/// （focused_pane），副栏由 SplitView.bg 构造（bg_pane）。窗口切片公式/折叠/
+/// 倒序/滚动条与单栏完全一致——过滤/级别/折叠共享，逐栏独立的是
+/// 源/跟随/滚动/选中/清屏标记。
+struct PaneView<'a> {
+    source: Option<&'a str>,
+    cache: &'a crate::app::ViewCache,
+    following: bool,
+    scroll_y: u16,
+    scroll_x: u16,
+    selected: Option<u64>,
+}
+
+fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, pane: PaneView) {
+    // 行区高度即窗口行数（单栏 = out.log；分屏 = 各栏减去栏头的行区）
+    let visible = area.height as usize;
     // [v0.7.6 修复] 窗口 = hits[end-visible .. end]，end = len - scroll_y。
     // 旧实现内容取到末尾 + scroll(scroll_y) 跳过前 scroll_y 行——两者恰好抵消，
     // 屏幕永远显示末尾 visible 行（用户反馈"光标上去了内容不变化"的根因）。
     // 现在精确切片，纵向 scroll 恒为 0；scroll_y 只由窗口计算表达。
-    let scroll_y = if st.following {
-        0
-    } else {
-        st.viewport.scroll_y
-    } as usize;
-    let hits = &st.view_cache.hits;
+    let scroll_y = if pane.following { 0 } else { pane.scroll_y } as usize;
+    let hits = &pane.cache.hits;
     let len = hits.len();
     let end = len.saturating_sub(scroll_y);
     let start = end.saturating_sub(visible);
     let slice = &hits[start..end.max(start)];
+    let buf = pane.source.and_then(|sid| st.buffers.get(sid));
 
     let fm = st.active_filter().clone();
     let mut lines = Vec::with_capacity(slice.len());
-    // [v0.10] 相似行折叠：连续相同消息体（剥时间戳后）合并为一行，行尾 ` ×N`
-    let mut idx = 0usize;
-    while idx < slice.len() {
-        let no = slice[idx];
-        let Some(line) = st.current_buffer().by_line_no(no) else {
-            idx += 1;
-            continue;
-        };
-        // 向后吞并 body 相同的相邻行
-        let mut group = 1usize;
-        if st.ui.dedupe {
-            while idx + group < slice.len() {
-                let Some(next) = st.current_buffer().by_line_no(slice[idx + group]) else {
-                    break;
-                };
-                if !line.body.is_empty() && next.body == line.body && next.level == line.level {
-                    group += 1;
-                } else {
-                    break;
+    // [v0.10] 相似行折叠：连续相同消息体（剥时间戳后）合并为一行，行尾 ` ×N`。
+    // [v0.10.8] 倒序（o 键）：同一窗口切片反向渲染（最新在顶），折叠自切片尾向前
+    // 吞并——等值游程对称，分组集合与正序一致，只是代表行取组内最新行
+    // （倒序下显示组内最新时间戳更自然）；选中判断是整组 any，两序一致。
+    if st.ui.reverse {
+        let mut idx = slice.len();
+        while idx > 0 {
+            let Some(line) = buf.and_then(|b| b.by_line_no(slice[idx - 1])) else {
+                idx -= 1;
+                continue;
+            };
+            // 向前吞并 body 相同的相邻行
+            let mut group = 1usize;
+            if st.ui.dedupe {
+                while idx > group {
+                    let Some(prev) = buf.and_then(|b| b.by_line_no(slice[idx - 1 - group])) else {
+                        break;
+                    };
+                    if !line.body.is_empty() && prev.body == line.body && prev.level == line.level {
+                        group += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
+            let count = group;
+            let selected = slice[idx - count..idx]
+                .iter()
+                .any(|&n| Some(n) == pane.selected);
+            idx -= count;
+            lines.push(log_row(line, count, selected, &fm, pane.scroll_x));
         }
-        let count = group;
-        let selected = slice[idx..idx + count]
-            .iter()
-            .any(|&n| Some(n) == st.selected_line_no);
-        idx += count;
-        let base = Style::default().fg(level_color(line.level));
-        let mut spans = vec![Span::styled(
-            format!("{} ", line.level.label()),
-            if selected {
-                base.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
-            } else {
-                base
-            },
-        )];
-        // 关键词反白（过滤文本高亮，§12.3）；[v0.7.6] 横滚：raw 跳过前 scroll_x 字符
-        // [v0.10] 折叠组 >1 时行尾追加 ×N
-        let suffix = if count > 1 {
-            format!("  ×{count}")
-        } else {
-            String::new()
-        };
-        let raw_view: String = if st.viewport.scroll_x > 0 {
-            format!(
-                "{}{suffix}",
-                line.raw
-                    .chars()
-                    .skip(st.viewport.scroll_x as usize)
-                    .collect::<String>()
-            )
-        } else {
-            format!("{}{suffix}", line.raw)
-        };
-        for (seg, matched) in split_matches(&raw_view, &fm) {
-            let style = match (matched, selected) {
-                (true, true) => base
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::REVERSED | Modifier::BOLD),
-                (true, false) => base.add_modifier(Modifier::REVERSED),
-                (false, true) => base.bg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                (false, false) => base,
+    } else {
+        let mut idx = 0usize;
+        while idx < slice.len() {
+            let Some(line) = buf.and_then(|b| b.by_line_no(slice[idx])) else {
+                idx += 1;
+                continue;
             };
-            spans.push(Span::styled(seg.to_string(), style));
+            // 向后吞并 body 相同的相邻行
+            let mut group = 1usize;
+            if st.ui.dedupe {
+                while idx + group < slice.len() {
+                    let Some(next) = buf.and_then(|b| b.by_line_no(slice[idx + group])) else {
+                        break;
+                    };
+                    if !line.body.is_empty() && next.body == line.body && next.level == line.level {
+                        group += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let count = group;
+            let selected = slice[idx..idx + count].iter().any(|&n| Some(n) == pane.selected);
+            idx += count;
+            lines.push(log_row(line, count, selected, &fm, pane.scroll_x));
         }
-        lines.push(Line::from(spans));
     }
     // [v0.7.6] 横向滚动：渲染前对 raw 做字符级 skip——级别前缀固定不动，
     // 长行尾部随 ←/→ 可见。[v0.10.5] 主视图固定单行（截断+横滚），长行全文看详情面板
     let para = Paragraph::new(lines);
     frame.render_widget(para, area);
-    // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置
-    let mut sb_state = ScrollbarState::new(len).position(start);
+    // 位置滚动条（§12.1 / Day3 任务清单）：thumb 表示当前视口在 hits 中的位置。
+    // [v0.10.8] 倒序：thumb 从顶部计（顶 = 最新），position = 已滚出的行数
+    let sb_pos = if st.ui.reverse {
+        scroll_y.min(len)
+    } else {
+        start
+    };
+    let mut sb_state = ScrollbarState::new(len).position(sb_pos);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -371,6 +490,56 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
         area,
         &mut sb_state,
     );
+}
+
+/// 单行渲染（[v0.10.8] 正序/倒序两分支共用）：级别前缀 + 关键词反白 + ×N 后缀
+/// + 横滚字符级 skip
+fn log_row(
+    line: &logtail_core::log::LogLine,
+    count: usize,
+    selected: bool,
+    fm: &FilterMode,
+    scroll_x: u16,
+) -> Line<'static> {
+    let base = Style::default().fg(level_color(line.level));
+    let mut spans = vec![Span::styled(
+        format!("{} ", line.level.label()),
+        if selected {
+            base.bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        } else {
+            base
+        },
+    )];
+    // 关键词反白（过滤文本高亮，§12.3）；[v0.7.6] 横滚：raw 跳过前 scroll_x 字符
+    // [v0.10] 折叠组 >1 时行尾追加 ×N
+    let suffix = if count > 1 {
+        format!("  ×{count}")
+    } else {
+        String::new()
+    };
+    let raw_view: String = if scroll_x > 0 {
+        format!(
+            "{}{suffix}",
+            line.raw
+                .chars()
+                .skip(scroll_x as usize)
+                .collect::<String>()
+        )
+    } else {
+        format!("{}{suffix}", line.raw)
+    };
+    for (seg, matched) in split_matches(&raw_view, fm) {
+        let style = match (matched, selected) {
+            (true, true) => base
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            (true, false) => base.add_modifier(Modifier::REVERSED),
+            (false, true) => base.bg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            (false, false) => base,
+        };
+        spans.push(Span::styled(seg.to_string(), style));
+    }
+    Line::from(spans)
 }
 
 /// 按 FilterMode 把原文切成 (片段, 是否命中) 序列，用于反白高亮
@@ -434,12 +603,18 @@ fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
 
 fn render_statusbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState) {
     let hint = if st.detail_panel.is_some() {
-        // [v0.7.5] 面板开着：其余键照常（↑↓ 换选中行后面板跟随刷新）
-        "详情: q:关 c:复制行 C:复制上下文 t:trace p:源 | ↑↓:换行 R:重连 /:过滤 Esc:关"
+        // [v0.7.5] 面板开着：其余键照常（↑↓ 换行后面板跟随刷新）
+        "详情: q:关 c:复制行 C:复制上下文 t:trace p:源 | ↑↓:换行 R:重连 /:过滤 Esc:关".to_string()
     } else if st.sidebar.focus {
-        "侧栏: ↑↓:选 Enter:连接 Tab/Esc:返回 q:退出侧栏"
+        "侧栏: ↑↓:选 Enter:连接 Tab/Esc:返回 q:退出侧栏".to_string()
     } else {
-        "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 S:折叠 ←→:横滚 g:最新"
+        let base = "Tab:侧栏 q:退出 /:过滤 Ctrl+R:正则 f:模式 R:重连 l:更早 e:导出 p:远筛 c:清屏 S:折叠 o:倒序 w:分屏 ←→:横滚 g:最新";
+        // [v0.10.10] 分屏开着才提示换栏键
+        if st.split.is_some() {
+            format!("{base} n:换栏")
+        } else {
+            base.to_string()
+        }
     };
     let (n, hits) = (st.current_buffer().len(), st.view_cache.hits.len());
     // 断网/认证失败/超时 → 红字（§四 Day7），正常消息灰底黑字
@@ -973,6 +1148,97 @@ mod tests {
             !all.contains("L29"),
             "末尾行不得残留（旧 bug 显示恒为末尾）"
         );
+    }
+
+    #[test]
+    fn 渲染_倒序最新在顶() {
+        // [v0.10.8] o 倒序：同一窗口切片反向渲染——跟随态顶行 = 最新（L29），
+        // 窗口仍 18 行（切片公式两序等价，只反迭代）
+        let mut st = test_state();
+        let mut buf = logtail_core::log::LogBuffer::new(100);
+        for i in 0..30 {
+            let mut l = logtail_core::log::LogLine {
+                raw: format!("L{i:02}"),
+                ..Default::default()
+            };
+            l.source = "test-src".into();
+            l.body = format!("B{i:02}"); // 各行不同不折叠
+            buf.push(l);
+        }
+        st.buffers.insert("test-src".into(), buf);
+        st.ui.reverse = true;
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join(
+            "
+",
+        );
+        assert!(all.contains("L29"), "倒序跟随态顶行应为最新 L29: {all}");
+        assert!(all.contains("L12"), "窗口 18 行到 L12");
+        assert!(!all.contains("L00"), "最旧行不得出现在跟随态: {all}");
+    }
+
+    #[test]
+    fn 渲染_倒序_折叠组与行序() {
+        // [v0.10.8] 倒序+折叠：等值游程对称分组不变（×4 保留）；最新行排屏幕最上
+        let mut st = test_state();
+        let mut buf = logtail_core::log::LogBuffer::new(10);
+        for i in 0..4 {
+            let mut l = logtail_core::log::LogLine {
+                raw: format!("2026-11-05T00:16:2{i}Z retry attempt"),
+                body: "retry attempt".into(),
+                ..Default::default()
+            };
+            l.source = "test-src".into();
+            buf.push(l);
+        }
+        buf.push(logtail_core::log::LogLine {
+            raw: "different".into(),
+            body: "different".into(),
+            ..Default::default()
+        });
+        st.buffers.insert("test-src".into(), buf);
+        st.ui.reverse = true;
+        st.last_rebuild += 1;
+        let t = draw(&mut st);
+        let all = rows(&t).join(
+            "
+",
+        );
+        assert!(all.contains("×4"), "倒序下折叠组仍 ×4: {all}");
+        let pos_diff = all.find("different").unwrap();
+        let pos_retry = all.find("retry attempt").unwrap();
+        assert!(pos_diff < pos_retry, "倒序：最新行 different 在 retry 组上方: {all}");
+    }
+
+    #[test]
+    fn 渲染_分屏双栏_各源各行() {
+        // [v0.10.10] w 分屏：80x24 窄屏上下堆叠——两栏头 + 各自源的行都可见
+        let mut st = test_state();
+        let mut buf2 = logtail_core::log::LogBuffer::new(10);
+        for tag in ["ALPHA-b", "BETA-b"] {
+            let mut l = logtail_core::log::LogLine {
+                raw: tag.into(),
+                ..Default::default()
+            };
+            l.source = "src-b".into();
+            l.body = tag.into(); // 各行不同不折叠
+            buf2.push(l);
+        }
+        st.buffers.insert("src-b".into(), buf2);
+        st.tabs.push("src-b".into());
+        st.toggle_split(); // 副栏取第一个非焦点 tab = src-b
+        st.ui.show_sidebar = false;
+        st.ui.show_sparkline = false;
+        let t = draw(&mut st);
+        let all = rows(&t).join(
+            "
+",
+        );
+        assert!(all.contains("[test-src]"), "焦点栏头: {all}");
+        assert!(all.contains("[src-b]"), "副栏头: {all}");
+        assert!(all.contains("start sync"), "焦点栏显示自己源的行: {all}");
+        assert!(all.contains("ALPHA-b"), "副栏显示自己源的行: {all}");
     }
 
     #[test]

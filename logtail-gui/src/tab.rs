@@ -9,8 +9,8 @@ use eframe::egui;
 
 use logtail_core::log::filter::{FilterMode, LevelFilter, NO_FILTER, rebuild_view};
 use logtail_core::log::parser::parse_line_multi;
-use logtail_core::log::{LogBuffer, LogLevel};
-use logtail_core::source::SourceType;
+use logtail_core::log::{LogBuffer, LogLevel, sparkline};
+use logtail_core::source::{ModeVariant, SourceType};
 
 /// 会话状态直接复用 TUI 的定义（标签也一致）
 pub use logtail_core::ssh::session::SessionState;
@@ -55,6 +55,12 @@ pub struct Tab {
     pub max_lines: usize,
     pub state: SessionState,
 
+    // ---- 远程会话参数（[v0.2.0] 模式/远筛按 tab 走；重连用）----
+    /// 连接模式：全量 / 快捷(since) / 精准窗口；本地 tab 恒 Full（不参与 UI）
+    pub mode: ModeVariant,
+    /// 远程预过滤 pattern（Some = 命令尾接 | grep，重连时生效）
+    pub remote_prefilter: Option<String>,
+
     // ---- 过滤输入（随输入实时生效，无需回车）----
     pub filter_input: String,
     pub regex_on: bool,
@@ -81,6 +87,20 @@ pub struct Tab {
     view_built_at: usize,
     view_filter: Option<FilterMode>,
     view_level: LevelFilter,
+    view_dedupe: bool,
+    /// [v0.2.0] 折叠显示列表：相邻同 body+level 合并为 (代表行, 组内行数)；
+    /// dedupe 关时 count 恒 1（渲染层统一走 display，不分支）
+    pub display: Vec<(u64, usize)>,
+
+    /// [v0.2.0] sparkline 分桶（core::sparkline 产出，宽度=spark_width）
+    pub spark: Vec<u64>,
+    spark_width: usize,
+    spark_built_at: usize,
+
+    /// [v0.2.0] 横向滚动像素偏移（←→ 长行平移，Home 复位）
+    pub h_scroll_x: f32,
+    /// 上一帧日志区宽度（横滚步长 = 半屏）
+    pub last_log_width: f32,
 
     /// [v0.1.6] 行详情条：双击行 / 右键「查看完整行」/ Enter 打开，主视图固定单行，
     /// 长行全文在详情条内折行（对应 TUI 详情面板心智）；
@@ -90,6 +110,10 @@ pub struct Tab {
     pub scroll_to_line: Option<u64>,
     /// [v0.1.7] 上一帧滚动偏移（scroll_to_line 的可见性判断基准）
     pub last_scroll_offset: f32,
+
+    /// [v0.10.8] 倒序暂停钉窗：暂停期间新入行数累积，渲染层把视口下移对应
+    /// 像素后清零（新行从顶部涌入会把正在看的内容推下去，需补偿钉住）
+    pub pending_top_rows: usize,
 
     /// 本地文件大小（状态栏）；远程 tab 显示会话状态
     pub file_size: u64,
@@ -137,6 +161,8 @@ impl Tab {
             buffer: LogBuffer::new(max_lines),
             max_lines,
             state: SessionState::Connecting,
+            mode: ModeVariant::default(),
+            remote_prefilter: None,
             filter_input: String::new(),
             regex_on: false,
             regex_error: None,
@@ -154,9 +180,17 @@ impl Tab {
             view_built_at: usize::MAX,
             view_filter: None,
             view_level: LevelFilter::All,
+            view_dedupe: true,
+            display: Vec::new(),
+            spark: Vec::new(),
+            spark_width: 0,
+            spark_built_at: usize::MAX,
+            h_scroll_x: 0.0,
+            last_log_width: 0.0,
             detail_line: None,
             scroll_to_line: None,
             last_scroll_offset: 0.0,
+            pending_top_rows: 0,
             file_size: 0,
         }
     }
@@ -191,7 +225,9 @@ impl Tab {
         self.clear_selection();
         self.detail_line = None; // 行已不存在，详情条一并关闭
         self.view.clear();
+        self.display.clear();
         self.view_built_at = self.total_pushed;
+        self.pending_top_rows = 0; // [v0.10.8] 缓冲已空，无需钉窗补偿
     }
 
     /// 当前选中区间（anchor 与 Shift 终点归一化为 (lo, hi) 含端点）；无选中 None
@@ -227,6 +263,27 @@ impl Tab {
                 taken += 1;
             }
             n = n.saturating_add(1);
+        }
+        Some(out).filter(|s| !s.is_empty())
+    }
+
+    /// [v0.2.0] 复制上下文块（同 TUI C 键）：`no` 前后各 n 行按顺序 `\n` 拼接，
+    /// 中心行含在内；淘汰行跳过；全淘汰 → None。
+    pub fn context_text(&self, no: u64, n: u64) -> Option<String> {
+        let lo = no.saturating_sub(n);
+        let hi = no.saturating_add(n);
+        let mut out = String::new();
+        let mut taken = 0usize;
+        let mut cur = lo;
+        while cur <= hi && taken < self.max_lines {
+            if let Some(l) = self.buffer.by_line_no(cur) {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&l.raw);
+                taken += 1;
+            }
+            cur = cur.saturating_add(1);
         }
         Some(out).filter(|s| !s.is_empty())
     }
@@ -271,19 +328,92 @@ impl Tab {
         self.compiled.clone()
     }
 
-    /// 视图按需重建（每帧调用；命中缓存只在 总数/过滤/级别 变化时重算）
-    pub fn ensure_view(&mut self) {
+    /// 视图按需重建（每帧调用；命中缓存只在 总数/过滤/级别/折叠开关 变化时重算）。
+    /// [v0.2.0] dedupe 开 → 相邻同 body+level 行折叠进 display（语义同 TUI S 键）；
+    /// 关 → display 与 view 一一对应（count 恒 1，渲染层统一走 display 不分支）。
+    pub fn ensure_view(&mut self, dedupe: bool) {
         let fm = self.active_filter();
         if self.total_pushed != self.view_built_at
             || self.view_filter != fm
             || self.view_level != self.level
+            || self.view_dedupe != dedupe
         {
             self.view = rebuild_view(&self.buffer, fm.as_ref().unwrap_or(&NO_FILTER), self.level);
+            self.display = if dedupe {
+                build_display(&self.view, &self.buffer)
+            } else {
+                self.view.iter().map(|&no| (no, 1)).collect()
+            };
             self.view_built_at = self.total_pushed;
             self.view_filter = fm;
             self.view_level = self.level;
+            self.view_dedupe = dedupe;
         }
     }
+
+    /// [v0.2.0] sparkline 按需刷新（宽度变化或视图重建后重算；core::sparkline 分桶）
+    pub fn refresh_spark(&mut self, width: usize) {
+        if width == 0 {
+            return;
+        }
+        if width != self.spark_width || self.total_pushed != self.spark_built_at {
+            self.spark = sparkline(&self.buffer, width, 1);
+            self.spark_width = width;
+            self.spark_built_at = self.total_pushed;
+        }
+    }
+
+    /// [v0.2.0] line_no → display 行号（滚动定位用）：view 内定位（被过滤掉取插入点
+    /// 最近行，与 move_selection 同语义），再按组内行数前缀和映射到折叠组下标
+    pub fn display_row_of(&self, no: u64) -> Option<usize> {
+        if self.view.is_empty() || self.display.is_empty() {
+            return None;
+        }
+        let vi = match self.view.binary_search(&no) {
+            Ok(i) => i,
+            Err(i) => i.min(self.view.len() - 1),
+        };
+        let mut cum = 0usize;
+        for (g, (_, count)) in self.display.iter().enumerate() {
+            if vi < cum + *count {
+                return Some(g);
+            }
+            cum += *count;
+        }
+        Some(self.display.len() - 1)
+    }
+}
+
+/// [v0.10.10] 分屏副栏 tab 下标：激活 tab 的下一个（循环）。len ≥ 2 才会调用。
+pub fn split_other_idx(active: usize, len: usize) -> usize {
+    (active + 1) % len.max(1)
+}
+
+/// [v0.2.0] 折叠显示列表：连续相同消息体（body 非空）且同级别的相邻行合并为
+/// (首行 line_no, 组内行数)——与 TUI 渲染层折叠同语义（render.rs render_logs）
+fn build_display(view: &[u64], buf: &LogBuffer) -> Vec<(u64, usize)> {
+    let mut out = Vec::with_capacity(view.len());
+    let mut i = 0usize;
+    while i < view.len() {
+        let Some(line) = buf.by_line_no(view[i]) else {
+            i += 1;
+            continue;
+        };
+        let mut group = 1usize;
+        while i + group < view.len() {
+            let Some(next) = buf.by_line_no(view[i + group]) else {
+                break;
+            };
+            if !line.body.is_empty() && next.body == line.body && next.level == line.level {
+                group += 1;
+            } else {
+                break;
+            }
+        }
+        out.push((view[i], group));
+        i += group;
+    }
+    out
 }
 
 /// (编译结果, 正则错误)。空输入 = 无过滤；文本模式原样透传（匹配时按 `|` 拆多关键词）。
@@ -345,7 +475,7 @@ mod tests {
         ]);
         assert_eq!(n, 3);
         assert_eq!(t.buffer.len(), 3);
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 3);
         // 全部解析后级别正确
         let levels: Vec<_> = t.buffer.iter().map(|l| l.level).collect();
@@ -363,18 +493,18 @@ mod tests {
             "INFO ok c".into(),
         ]);
         t.filter_input = "timeout|refused".into();
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 2, "多关键词 OR 命中 2 行");
         // 改级别阈值 → 立即重建
         t.level = LevelFilter::Error;
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 2, "过滤词仍生效，两行都是 ERROR");
         t.filter_input.clear();
         t.level = LevelFilter::Warn;
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 2, "无过滤 + WARN+ = 两行 ERROR");
         t.level = LevelFilter::All;
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 3);
     }
 
@@ -384,12 +514,12 @@ mod tests {
         t.ingest(vec!["refused by db".into(), "all good".into()]);
         t.regex_on = true;
         t.filter_input = "refus.*db".into();
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 1);
         assert!(t.regex_error.is_none());
         // 坏正则：无过滤生效 + 报错可见
         t.filter_input = "([".into();
-        t.ensure_view();
+        t.ensure_view(false);
         assert!(t.regex_error.is_some());
         assert_eq!(t.view.len(), 2, "编译失败 = 无过滤，全部可见");
     }
@@ -398,10 +528,10 @@ mod tests {
     fn 视图_随新行增量更新() {
         let mut t = tab();
         t.ingest(vec!["INFO a".into()]);
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 1);
         t.ingest(vec!["ERROR b".into(), "INFO c".into()]);
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 3, "新行进视图");
         // line_no 稳定：淘汰窗口内可直接反查
         let no = t.view[0];
@@ -412,7 +542,7 @@ mod tests {
     fn 清屏_视图与选中复位() {
         let mut t = tab();
         t.ingest(vec!["INFO a".into()]);
-        t.ensure_view();
+        t.ensure_view(false);
         t.selected = t.view.first().copied();
         t.clear();
         assert_eq!(t.buffer.len(), 0);
@@ -421,7 +551,7 @@ mod tests {
         assert!(t.sel_focus.is_none());
         // 清屏后继续 ingest 正常
         t.ingest(vec!["ERROR b".into()]);
-        t.ensure_view();
+        t.ensure_view(false);
         assert_eq!(t.view.len(), 1);
     }
 
@@ -554,7 +684,7 @@ mod tests {
     fn 移动选中_详情跟随与滚动请求() {
         let mut t = tab();
         t.ingest(vec!["a".into(), "b".into(), "c".into(), "d".into()]);
-        t.ensure_view();
+        t.ensure_view(false);
         // 无视图边界：末尾起点向上移（无选中 = 从末行起）
         assert_eq!(t.move_selection(-1), Some(2), "无选中从末行起，-1 到倒数第二行");
         assert_eq!(t.move_selection(-1), Some(1));
@@ -567,11 +697,121 @@ mod tests {
         assert_eq!(t.move_selection(-10), Some(0), "向上钳到首行");
         // 过滤视图：选中被过滤掉时从插入点最近行继续
         t.filter_input = "c".into();
-        t.ensure_view();
+        t.ensure_view(false);
         t.selected = Some(0); // a 已不在视图
         assert_eq!(t.move_selection(1), Some(2), "插入点最近行起跳");
         // 空视图
         t.clear();
         assert!(t.move_selection(1).is_none());
+    }
+
+    #[test]
+    fn 折叠显示列表_相邻同body合并与开关() {
+        let mut t = tab();
+        // 相邻 3 行同 body（时间戳不同不影响 body）+ 不同级别行 + 不同 body 行
+        t.ingest(vec![
+            "2026-11-07 10:00:00 INFO retry attempt".into(),
+            "2026-11-07 10:00:01 INFO retry attempt".into(),
+            "2026-11-07 10:00:02 INFO retry attempt".into(),
+            "2026-11-07 10:00:03 ERROR retry attempt".into(),
+            "2026-11-07 10:00:04 INFO different".into(),
+        ]);
+        t.ensure_view(true);
+        assert_eq!(t.display.len(), 3, "3 连行 + 1 错误级 + 1 不同 body");
+        assert_eq!(t.display[0], (0, 3), "首组代表行 no=0，×3");
+        assert_eq!(t.display[1], (3, 1), "级别不同不合并");
+        assert_eq!(t.display[2], (4, 1));
+        // 关闭折叠 → 与 view 一一对应
+        t.ensure_view(false);
+        assert_eq!(t.display.len(), 5);
+        // 无时间戳行 body=raw：相同即折叠（与 TUI 同语义）
+        let mut t2 = tab();
+        t2.ingest(vec!["a".into(), "a".into(), "b".into()]);
+        t2.ensure_view(true);
+        assert_eq!(t2.display.len(), 2, "两个相同 a 折叠，b 独立");
+    }
+
+    #[test]
+    fn display_row_of_view下标映射到折叠组() {
+        let mut t = tab();
+        t.ingest(vec![
+            "2026-11-07 10:00:00 INFO same".into(),
+            "2026-11-07 10:00:01 INFO same".into(),
+            "2026-11-07 10:00:02 INFO other".into(),
+        ]);
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(0, 2), (2, 1)]);
+        // 视图内命中
+        assert_eq!(t.display_row_of(0), Some(0));
+        assert_eq!(t.display_row_of(1), Some(0), "组内第二行映射到同组");
+        assert_eq!(t.display_row_of(2), Some(1));
+        // 被过滤掉的行取插入点最近行
+        t.filter_input = "other".into();
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(2, 1)]);
+        assert_eq!(t.display_row_of(0), Some(0));
+        // 空视图
+        t.clear();
+        assert_eq!(t.display_row_of(0), None);
+    }
+
+    #[test]
+    fn 分屏副栏下标_激活的下一个循环() {
+        assert_eq!(super::split_other_idx(0, 2), 1);
+        assert_eq!(super::split_other_idx(1, 2), 0);
+        assert_eq!(super::split_other_idx(2, 3), 0, "末个循环回首");
+    }
+
+    #[test]
+    fn spark_宽度与数据变化时重算() {
+        let mut t = tab();
+        t.ingest(vec!["2026-11-07 10:00:00 INFO x".into()]);
+        t.refresh_spark(8);
+        assert_eq!(t.spark.len(), 8);
+        assert!(t.spark.contains(&1), "带时间戳行计入当前秒桶");
+        let before = t.spark.clone();
+        t.refresh_spark(8); // 宽度与数据均未变 → 不重算
+        assert_eq!(t.spark, before);
+        t.refresh_spark(4); // 宽度变化 → 重算
+        assert_eq!(t.spark.len(), 4);
+        // 无时间戳行 → 全零
+        let mut t2 = tab();
+        t2.ingest(vec!["plain".into()]);
+        t2.refresh_spark(4);
+        assert!(t2.spark.iter().all(|&c| c == 0));
+    }
+
+    #[test]
+    fn 复制上下文块_拼接与淘汰跳过() {
+        let mut t = tab();
+        t.ingest(vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]);
+        // 中心 ±1：b c d（line_no 1..3）
+        assert_eq!(t.context_text(2, 1).as_deref(), Some("b\nc\nd"));
+        // 中心在头部：不越界
+        assert_eq!(t.context_text(0, 2).as_deref(), Some("a\nb\nc"));
+        assert_eq!(t.context_text(4, 2).as_deref(), Some("c\nd\ne"));
+        // 中心行已淘汰（clear 后）→ None
+        t.clear();
+        assert!(t.context_text(2, 5).is_none());
+    }
+
+    #[test]
+    fn 远程tab_模式与远筛字段初值() {
+        let mut t = tab();
+        assert!(matches!(t.mode, ModeVariant::Full));
+        assert!(t.remote_prefilter.is_none());
+        // 模式切快捷 + 远筛开 → 重连后保留（tab 字段随 clear 不清）
+        t.mode = ModeVariant::Quick {
+            since: Some("2h".into()),
+        };
+        t.remote_prefilter = Some("timeout".into());
+        t.clear();
+        assert!(matches!(
+            t.mode,
+            ModeVariant::Quick {
+                since: Some(s)
+            } if s == "2h"
+        ));
+        assert_eq!(t.remote_prefilter.as_deref(), Some("timeout"));
     }
 }

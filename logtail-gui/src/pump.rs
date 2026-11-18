@@ -26,6 +26,8 @@ pub struct RemoteConnect {
     pub server: ServerConfig,
     pub source: LogSource,
     pub mode: ModeVariant,
+    /// [v0.2.0] 远端预过滤 pattern（Some = 命令尾接 `| grep -E --line-buffered`）
+    pub prefilter: Option<String>,
 }
 
 impl RemoteConnect {
@@ -134,6 +136,7 @@ fn handle_cmd(
                 &rc.server,
                 &rc.source,
                 &rc.mode,
+                rc.prefilter.as_deref(),
                 Duration::from_secs(20),
             )) {
                 Ok(sess) => {
@@ -280,6 +283,7 @@ mod tests {
                     tail: 10,
                 },
                 mode: ModeVariant::Full,
+                prefilter: None,
             })))
             .unwrap();
 

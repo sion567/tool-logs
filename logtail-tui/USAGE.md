@@ -1,7 +1,7 @@
 # logtail-tui 使用手册
 
 > 面向使用者的完整操作说明。开发与设计细节见 `../logtail-design.md`；30 秒速览见 [README](README.md)。
-> 当前版本：v0.10.5（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
+> 当前版本：v0.10.10（logtail-tui；核心库 logtail-core，workspace 结构见 ../logtail-design.md）
 
 ---
 
@@ -26,7 +26,7 @@
 git clone <仓库地址> && cd logtail
 cargo build --release
 # 二进制在 target/release/logtail-tui
-./target/release/logtail-tui --version   # logtail-tui v0.10.5
+./target/release/logtail-tui --version   # logtail-tui v0.10.7
 ```
 
 ### 方式二：直接用已构建的二进制
@@ -68,6 +68,8 @@ user = "xxm"
 # 认证二选一：
 auth = { type = "password", password = "你的密码" }
 # auth = { type = "key", path = "~/.ssh/id_rsa", passphrase = "可选" }
+# auth = { type = "keyring" }        # 密钥环认证：密码存 OS 凭据库不落明文（见 §密钥环）
+# auth = { type = "keyring", account = "共享账户" }   # 多服务器共用一份凭据
 
 [[sources]]                   # 日志源，可多个，挂在某台服务器上
 name = "my-api"               # 唯一名 = tab 名 / 导出文件名的一部分
@@ -84,10 +86,11 @@ name = "host-system"
 server = "prod-01"
 source = { type = "journalctl", service = "systemd", since = "today" }
 
-[ui]                          # UI 显示设置（v0.9；热键 b/v/h 切换，退出自动记住）
+[ui]                          # UI 显示设置（v0.9；热键 b/v/h/o 切换，退出自动记住）
 show_sparkline = true         # 日志量时间轴
 show_sidebar = true           # 侧栏（隐藏后日志区全宽，b 键切回）
 show_hints = true             # 状态栏键位提示
+# reverse = true              # 倒序显示（最新在顶；v0.10.8，默认 false = 时间正序）
 
 [presets.quick_error]         # 预设：侧栏一键应用的过滤组合
 name = "仅ERROR(1h)"
@@ -167,9 +170,12 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 | `←` / `→` | **横向滚动**长行（每次半屏，级别标签固定不动；v0.7.6） |
 | `Home` | 横滚复位到行首 |
 | `Space` | 暂停 / 恢复跟随（暂停时新行不顶走当前视图） |
+| `O` / `o` | **倒序显示开关**（v0.10.8）：开 = 最新在顶，跟随=钉住顶部、新行把旧行往下推；暂停时视口钉住不动。默认时间正序（最新在底）。↑↓/PageUp/PageDown 的方向随视觉翻转（Down 恒为视觉向下） |
+| `W` / `w` | **分屏开关**（v0.10.10）：双栏同时 tail。宽屏（日志区 ≥100 列）左右分栏、窄屏上下堆叠。**过滤/级别/正则/折叠两栏共享**（同一次排障两边同筛）；逐栏独立的是：源、跟随/暂停、滚动、选中、清屏标记。侧栏连接与 `,`/`.` 切换都作用于**焦点栏**（蓝底栏头） |
+| `N` / `n` | **换焦点栏**（分屏开着时）：焦点栏与副栏内容互换，两栏位置不动。副栏未连接时先 `n` 切焦点再从侧栏连接 |
 | `G` / `g` | 跳到最新并恢复跟随 |
 | `Enter` | 展开选中行详情面板 |
-| `C` / `c` | 清屏（只清显示，连接不断；新日志继续进缓冲） |
+| `C` / `c` | 清屏（只清显示，连接不断；新日志继续进缓冲；分屏下只清焦点栏） |
 
 ### 日志区 · 过滤
 
@@ -200,10 +206,13 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 | 键 | 功能 |
 |----|------|
 | `c` | 复制该行原文到系统剪贴板 |
+| `C` | 复制该行上下文 ±5 块（`\n` 拼接，一次带走现场；v0.10.2） |
 | `t` | 按该行 trace_id 过滤（该行解析出了 trace_id 时） |
 | `p` | 聚焦源提示（同屏分屏规划中） |
 | `q` / `Esc` | 关闭面板 |
-| **其它按键照常** | 面板开着 `↑↓` 换选中行（面板跟随刷新）、`R` 重连、`/` 过滤、`,`/`.` 切 tab 都可用（v0.7.5）；上下文 ±5 全部可见（面板加高，v0.7.6） |
+| **其它按键照常** | 面板开着 `↑↓` 换选中行（面板跟随刷新）、`R` 重连、`/` 过滤、`,`/`.` 切 tab 都可用（v0.7.5） |
+
+> v0.10.6 起详情面板**只显示当前行**（时间/级别/来源/原始行/trace_id）——此前的 ±5 上下文展示按真机反馈撤销；要带走前后文用 `C` 复制上下文块。
 
 > 长行在面板内**自动折行显示全文**（v0.10.5）——主日志区固定单行（截断 + `←→` 横滚），看不完的内容进详情面板；docker 多行记录（一条记录打印多行内容）已拆成独立日志行，逐行进详情面板。
 
@@ -233,7 +242,7 @@ since = "1h"                  # docker 直接用；journalctl 自动换算成绝
 
 ### 7.3 下钻与取证
 
-`↑↓` 选中可疑行 → `Enter` 展开详情：时间、级别、来源、原始行、**上下文 ±5 行**（选中行标 `▶`）→ `c` 复制原文留证，或 `t` 沿 trace_id 一查到底。
+`↑↓` 选中可疑行 → `Enter` 展开详情：时间、级别、来源、原始行 → `c` 复制原文留证、`C` 复制上下文 ±5 块带走现场，或 `t` 沿 trace_id 一查到底。
 
 ### 7.4 回看历史与导出
 
@@ -283,6 +292,18 @@ LOGTAIL_SRC=docker \        # docker / file / journal / local（local 走本地�
 > `LOGTAIL_SRC=local LOGTAIL_CMD="C:/logs/app.log" ./logtail-tui --demo`
 
 `--version` / `-V` 打印版本。
+
+## 9.1 密钥环子命令（v0.10.9）
+
+```bash
+logtail-tui keyring set <服务器名>   # 交互输入密码（隐藏回显，输两遍确认）写入系统凭据库
+logtail-tui keyring del <服务器名>   # 删除该服务器的密钥环条目
+```
+
+- 服务器名必须已在 config.toml 的 `[[servers]]` 里（用于校验与取账户名）；`auth.type = "keyring"` 且带 `account` 时按 account 存取，否则按服务器名
+- 平台落点：Windows 凭据管理器（控制面板 → 用户凭据）、macOS 钥匙串、Linux Secret Service（需 gnome-keyring/KWallet 运行中，无头服务器没有 → 认证会报错，继续用明文 `password` 即可）
+- 写入后把该服务器的 `auth` 改为 `{ type = "keyring" }`（见 §2 样例）；sudo 密码缺省复用密钥环里的登录密码，与明文认证同一惯例
+- `--check-config` 按认证方式显示：明文会附迁移提示，密钥环显示账户名
 
 ---
 
@@ -342,7 +363,15 @@ sudo usermod -aG docker <用户名> && <用户名> 重新 SSH 登录生效
 logtail 会自动剥除远端 ANSI 转义序列再显示（真机验证过）；进度条这类单行多帧输出只保留最新内容。
 
 **Q：配置里的密码明文存着安全吗？**
-配置文件依赖文件权限保护（建议 `chmod 600`）。当前版本不做系统密钥环集成（设计文档 §16.3 有迁移计划）。`command` 类型源完全跳过校验，仅在完全信任时使用。
+明文认证依旧支持（依赖文件权限保护，建议 `chmod 600`）；**密码不想落盘用密钥环认证**（v0.10.9）：密码存系统凭据库，config.toml 只留引用。三步迁移：
+
+```bash
+logtail-tui keyring set staging        # ① 交互输入密码（隐藏回显，写入 OS 凭据库）
+# ② 把该服务器的 auth 改为 { type = "keyring" }
+# ③ 确认能连上后，删掉明文 password 行
+```
+
+Windows 存"凭据管理器"、macOS 存"钥匙串"、Linux 存 Secret Service（需 gnome-keyring/KWallet 在跑；无头服务器没有 → 认证报错，继续用明文即可）。`logtail-tui keyring del <服务器名>` 删条目；`--check-config` 会按认证方式显示并提示明文迁移。`command` 类型源完全跳过校验，仅在完全信任时使用。
 
 **Q：想放大字体/缩放界面？**
 TUI 程序无法控制字号——用终端自带的缩放：Windows Terminal `Ctrl+加号/减号` 或 `Ctrl+滚轮`。

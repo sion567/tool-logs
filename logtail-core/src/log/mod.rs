@@ -62,3 +62,69 @@ impl LogLevel {
         }
     }
 }
+
+/// [v0.7] 时间轴 sparkline（core 化：TUI 工具栏与 GUI 通用）：
+/// 以最新带时间戳的行对齐末端，按 bucket_secs 分桶计行数。
+/// 距末端超过 width 个桶的旧行丢弃；无时间戳的行不计入。
+pub fn sparkline(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<u64> {
+    let mut end = None;
+    for l in buf.iter() {
+        if let Some(ts) = l.timestamp {
+            end = Some(match end {
+                Some(e) if e >= ts => e,
+                _ => ts,
+            });
+        }
+    }
+    let mut v = vec![0u64; width];
+    let Some(end) = end else { return v };
+    for l in buf.iter() {
+        if let Some(ts) = l.timestamp {
+            let from_end = (end - ts).num_seconds().max(0) / bucket_secs;
+            if let Some(idx) = width.checked_sub(1 + from_end as usize) {
+                v[idx] += 1;
+            }
+        }
+    }
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use chrono::Duration;
+
+    fn buf_with_ts(counts: &[(i64, u64)]) -> LogBuffer {
+        let mut b = LogBuffer::new(100);
+        let now = Utc::now();
+        for (ago, n) in counts {
+            for _ in 0..*n {
+                let mut l = LogLine {
+                    raw: "x".into(),
+                    ..Default::default()
+                };
+                l.timestamp = Some(now - Duration::seconds(*ago));
+                b.push(l);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn sparkline_按秒分桶_末端对齐最新() {
+        let b = buf_with_ts(&[(0, 3), (2, 5), (10, 1)]);
+        let v = sparkline(&b, 5, 1); // 覆盖 [now-5s, now]
+        assert_eq!(v[4], 3, "最新一秒 3 行");
+        assert_eq!(v[2], 5, "now-2s 桶 5 行");
+        assert_eq!(v[0], 0, "now-5s 桶为空");
+        // 无时间戳的 buffer → 全零
+        let mut b2 = LogBuffer::new(10);
+        b2.push(LogLine {
+            raw: "no-ts".into(),
+            ..Default::default()
+        });
+        assert!(sparkline(&b2, 5, 1).iter().all(|&c| c == 0));
+    }
+}

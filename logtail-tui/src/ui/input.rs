@@ -161,6 +161,24 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
                 }
             );
         }
+        // [v0.10.8] 倒序显示：开 = 最新在顶；跟随语义随行序翻转（跟随 = 钉住最新端）
+        (KeyCode::Char('o') | KeyCode::Char('O'), _) => {
+            st.ui.reverse = !st.ui.reverse;
+            st.following = true;
+            st.viewport.scroll_y = 0;
+            st.status_msg = format!(
+                "倒序显示: {}",
+                if st.ui.reverse {
+                    "开（最新在顶）"
+                } else {
+                    "关（时间正序）"
+                }
+            );
+        }
+        // [v0.10.10] 分屏：w 开关双栏同时 tail（§20 v0.5），n 切换焦点栏；
+        // 过滤/级别/折叠两栏共享，跟随/滚动/选中逐栏独立
+        (KeyCode::Char('w') | KeyCode::Char('W'), _) => st.toggle_split(),
+        (KeyCode::Char('n') | KeyCode::Char('N'), _) => st.swap_panes(),
         (KeyCode::Tab, _) => {
             // [v0.9] 侧栏隐藏时先显示再聚焦
             if !st.ui.show_sidebar {
@@ -169,10 +187,14 @@ pub fn handle_normal_key(key: KeyEvent, st: &mut AppState) {
             st.sidebar.focus = true;
             st.status_msg = "侧栏聚焦：↑↓ 选择，Enter 连接/应用预设，Tab 返回".into();
         }
-        (KeyCode::Up, _) => move_selection(st, -1),
-        (KeyCode::Down, _) => move_selection(st, 1),
-        (KeyCode::PageUp, _) => move_selection(st, -(st.viewport.height.max(1) as isize)),
-        (KeyCode::PageDown, _) => move_selection(st, st.viewport.height.max(1) as isize),
+        (KeyCode::Up, _) => move_selection(st, sel_delta(st, -1)),
+        (KeyCode::Down, _) => move_selection(st, sel_delta(st, 1)),
+        (KeyCode::PageUp, _) => {
+            move_selection(st, sel_delta(st, -(st.viewport.height.max(1) as isize)))
+        }
+        (KeyCode::PageDown, _) => {
+            move_selection(st, sel_delta(st, st.viewport.height.max(1) as isize))
+        }
         // [v0.7.6] ←/→ 横向滚动（步长=半屏），Home 复位到行首；长行看不全的解法
         (KeyCode::Left, m) if m.is_empty() => {
             st.viewport.scroll_x = st.viewport.scroll_x.saturating_sub(40)
@@ -272,6 +294,17 @@ fn jump_latest(st: &mut AppState) {
     }
     st.following = true;
     st.viewport.scroll_y = 0;
+}
+
+/// [v0.10.8] 倒序时 ↑↓ 的视觉方向翻转：正序 Down=更新（视觉向下）；
+/// 倒序最新在顶，视觉向下 = 更旧 = hits 下标 -1，故 delta 取反。
+/// move_selection 本体的可见性数学与行序无关（窗口切片公式两序等价），不需改。
+fn sel_delta(st: &AppState, d: isize) -> isize {
+    if st.ui.reverse {
+        -d
+    } else {
+        d
+    }
 }
 
 /// ↑↓ 移动选中（只认 line_no，不认下标——不变式①），
@@ -960,6 +993,59 @@ mod tests {
             handle_normal_key(key(c), &mut st);
         }
         assert!(st.ui.show_sidebar && st.ui.show_sparkline && st.ui.show_hints);
+    }
+
+    #[test]
+    fn 键盘_o倒序_方向翻转与跟随复位() {
+        // [v0.10.8] o 切倒序：跟随复位到最新端；↑↓ 视觉方向翻转
+        // （倒序最新在顶，视觉向下 = 更旧 = hits 下标 -1）
+        let mut st = test_state();
+        let mut buf = logtail_core::log::LogBuffer::new(100);
+        for i in 0..30 {
+            let mut l = logtail_core::log::LogLine {
+                raw: format!("L{i:02}"),
+                ..Default::default()
+            };
+            l.source = "test-src".into();
+            l.body = format!("B{i:02}");
+            buf.push(l);
+        }
+        st.buffers.insert("test-src".into(), buf);
+        st.active_source = Some("test-src".into());
+        st.viewport.height = 18;
+
+        handle_normal_key(key('o'), &mut st);
+        assert!(st.ui.reverse, "o 开启倒序");
+        assert!(st.following && st.viewport.scroll_y == 0, "切倒序后跟随最新端");
+
+        // 倒序 Down = 视觉向下 = 更旧：无选中从最新端起 → L28
+        handle_normal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
+        assert_eq!(st.selected_line_no, Some(28), "倒序 Down 选更旧 L28");
+        assert!(!st.following, "移动选中自动暂停跟随");
+
+        // 倒序 Up = 视觉向上 = 更新：L28 → L29
+        handle_normal_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut st);
+        assert_eq!(st.selected_line_no, Some(29), "倒序 Up 选更新 L29");
+
+        // 再按 o 回正序：Down 恢复"更新"方向（L29 已是末行，钳在末行）
+        handle_normal_key(key('o'), &mut st);
+        assert!(!st.ui.reverse, "o 关闭倒序");
+        assert!(st.following && st.viewport.scroll_y == 0, "切回正序同样复位跟随");
+        handle_normal_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
+        assert_eq!(st.selected_line_no, Some(29));
+    }
+
+    #[test]
+    fn 键盘_w分屏_n换栏() {
+        // [v0.10.10] w 开/关分屏、n 换焦点栏（逻辑在 AppState::toggle_split/swap_panes）
+        let mut st = test_state();
+        handle_normal_key(key('w'), &mut st);
+        assert!(st.split.is_some(), "w 开分屏");
+        handle_normal_key(key('n'), &mut st);
+        // test_state 无已连接 tab：换栏后焦点栏变未连接占位
+        assert!(st.active_source.is_none(), "n 换栏到占位副栏");
+        handle_normal_key(key('w'), &mut st);
+        assert!(st.split.is_none(), "w 再按关闭");
     }
 
     #[test]

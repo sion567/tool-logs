@@ -1,6 +1,6 @@
 [package]
 name = "logtail-tui"
-version = "0.10.6"
+version = "0.10.10"
 edition = "2021"
 description = "logtail 终端界面（ratatui TUI）：状态机 / 渲染 / 键盘交互，核心逻辑在 logtail-core"
 
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 核心库：SSH 连接 / 日志源 / 解析过滤 / 配置
-logtail-core = { version = "0.10.4", path = "../logtail-core" }
+logtail-core = { version = "0.10.7", path = "../logtail-core" }
 # TUI
 ratatui = "0.26"
 crossterm = "0.27"
@@ -31,9 +31,11 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 # 错误 / 自身日志
 anyhow = "1"
+# 密钥环 set 子命令的隐藏密码输入（§16.3 [v0.10.9]）
+rpassword = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 # e2e 集成测试需要 core 的 in-process sshd 桩（§17）
-logtail-core = { version = "0.10.4", path = "../logtail-core", features = ["test-util"] }
+logtail-core = { version = "0.10.7", path = "../logtail-core", features = ["test-util"] }

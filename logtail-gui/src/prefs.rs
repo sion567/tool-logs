@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 /// 近期文件上限：菜单里只显示这么多
 const RECENT_MAX: usize = 10;
 
+/// [v0.2.0] 启动自动恢复的上次激活 tab（与 TUI remember_last_source 同心智）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum LastTab {
+    Local { path: String },
+    Remote { source: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Prefs {
@@ -20,6 +28,16 @@ pub struct Prefs {
     pub always_on_top: bool,
     /// 最近打开的文件（新→旧）
     pub recent_files: Vec<String>,
+    /// [v0.2.0] 相似行折叠 ×N（默认开，同 TUI）
+    pub dedupe: bool,
+    /// [v0.10.8] 倒序显示（最新在顶；默认关 = 时间正序，同 TUI o 键）
+    pub reverse: bool,
+    /// [v0.10.10] 分屏：激活 tab 与下一个 tab 并排（默认关，同 TUI w 键）
+    pub split: bool,
+    /// [v0.2.0] 日志量时间轴（默认开）
+    pub show_sparkline: bool,
+    /// [v0.2.0] 上次激活 tab（退出时更新，启动自动恢复）
+    pub last_tab: Option<LastTab>,
     pub window: WindowPrefs,
 }
 
@@ -37,6 +55,11 @@ impl Default for Prefs {
             max_lines: 10_000,
             always_on_top: false,
             recent_files: Vec::new(),
+            dedupe: true,
+            reverse: false,
+            split: false,
+            show_sparkline: true,
+            last_tab: None,
             window: WindowPrefs {
                 w: 1280.0,
                 h: 800.0,
@@ -97,6 +120,13 @@ mod tests {
             max_lines: 2000,
             always_on_top: true,
             recent_files: vec!["C:/logs/a.log".into(), "D:/b.out".into()],
+            dedupe: false,
+            reverse: true,
+            split: true,
+            show_sparkline: false,
+            last_tab: Some(LastTab::Remote {
+                source: "prod-api".into(),
+            }),
             window: WindowPrefs {
                 w: 800.0,
                 h: 600.0,
@@ -111,6 +141,26 @@ mod tests {
         let p2 = from_toml(partial).unwrap();
         assert_eq!(p2.font_size, 18.0);
         assert_eq!(p2.max_lines, 10_000, "缺省字段回落默认值");
+        // v0.1.x 旧 gui.toml（无 dedupe/last_tab）→ 默认值，不报错
+        assert!(p2.dedupe, "折叠默认开");
+        assert!(p2.show_sparkline, "时间轴默认开");
+        assert!(!p2.reverse, "倒序默认关（时间正序）");
+        assert!(!p2.split, "分屏默认关");
+        assert!(p2.last_tab.is_none());
+        // 本地路径 last_tab 往返
+        let p3 = Prefs {
+            last_tab: Some(LastTab::Local {
+                path: "C:/logs/a.log".into(),
+            }),
+            ..Prefs::default()
+        };
+        let back3 = from_toml(&to_toml(&p3).unwrap()).unwrap();
+        assert_eq!(
+            back3.last_tab,
+            Some(LastTab::Local {
+                path: "C:/logs/a.log".into()
+            })
+        );
     }
 
     #[test]

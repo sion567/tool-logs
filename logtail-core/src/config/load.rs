@@ -32,6 +32,11 @@ host = "192.168.1.101"
 port = 22
 user = "deploy"
 auth = { type = "password", password = "change-me" }   # 具名字段
+# 密码不想明文落盘 → 用系统密钥环（§16.3）：先
+#   logtail-tui keyring set staging     （交互隐藏输入，写入 OS 凭据库）
+# 再把上面一行换成：
+# auth = { type = "keyring" }                           # 账户名默认 = 服务器 name
+# auth = { type = "keyring", account = "共享账户" }      # 多服务器共用一份凭据时
 
 [[sources]]
 name = "prod-api"
@@ -116,6 +121,9 @@ pub struct StateFile {
     pub ui_hints: Option<bool>,
     #[serde(default)]
     pub ui_dedupe: Option<bool>,
+    /// [v0.10.8] 倒序显示（最新在顶）；旧 state.toml 缺键回落 None（= 正序）
+    #[serde(default)]
+    pub ui_reverse: Option<bool>,
 }
 
 fn state_path() -> PathBuf {

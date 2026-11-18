@@ -39,6 +39,7 @@ pub use logtail_core::ssh::session::SessionState;
 
 /// [v0.9] UI 显示设置（运行时值）：热键 b/v/h 切换，退出经 state.toml 持久化。
 /// [v0.10.5] wrap_long_lines 撤销——主视图固定单行（截断+←→横滚），长行全文看详情面板
+/// [v0.10.8] reverse 倒序显示（o 键切换，最新在顶）
 #[derive(Debug, Clone)]
 pub struct UiState {
     pub show_sidebar: bool,
@@ -46,6 +47,8 @@ pub struct UiState {
     pub show_hints: bool,
     /// [v0.10] 相似行折叠 ×N（v0.4 路线遗留；S 键切换）
     pub dedupe: bool,
+    /// [v0.10.8] 倒序显示：开 = 最新在顶（o 键切换）
+    pub reverse: bool,
 }
 
 impl UiState {
@@ -55,6 +58,7 @@ impl UiState {
             show_sparkline: cfg.show_sparkline,
             show_hints: cfg.show_hints,
             dedupe: true, // [v0.10] 折叠默认开（刷屏场景收益大；S 键关闭）
+            reverse: cfg.reverse.unwrap_or(false), // [v0.10.8] 默认正序
         }
     }
 }
@@ -66,6 +70,31 @@ pub struct ViewCache {
     pub hits: Vec<u64>,
     /// [v0.7] 时间轴 sparkline：按秒分桶的行数（宽度随日志区，随 rebuild 刷新）
     pub spark: Vec<u64>,
+}
+
+/// [v0.10.10] 分屏副栏（非焦点栏）状态。焦点栏复用既有的 active_source/following/
+/// viewport/selected_line_no/cleared_before/view_cache 全局字段——键盘层/连接层/导出
+/// 天然只作用于焦点栏，零改动；换栏 = 焦点栏与副栏内容整体互换。
+#[derive(Debug)]
+pub struct BgPane {
+    /// 副栏显示的源（None = 未连接占位：Tab 进侧栏选源连进焦点栏）
+    pub source: Option<SourceId>,
+    pub following: bool,
+    pub scroll_y: u16,
+    pub scroll_x: u16,
+    pub selected_line_no: Option<u64>,
+    /// C 清屏的显示标记（逐栏独立）
+    pub cleared_before: Option<u64>,
+    pub view_cache: ViewCache,
+}
+
+/// [v0.10.10] 分屏状态：None = 单栏；Some = 双栏同时 tail（§20 v0.5 副栏部分）。
+/// 会话级设置，不持久化（副栏源是会话概念，同远程模式/远筛心智）。
+#[derive(Debug)]
+pub struct SplitView {
+    pub bg: BgPane,
+    /// 副栏在左侧？（左右分栏时；上下堆叠 = 上方，语义相同）
+    pub bg_left: bool,
 }
 
 /// 详情面板（§9，Day6）
@@ -154,6 +183,8 @@ pub struct AppState {
     pub force_redraw: bool,
     /// [v0.9] UI 显示设置（热键 b/v/h，退出持久化）
     pub ui: UiState,
+    /// [v0.10.10] 分屏（w 开关 / n 换栏）：None = 单栏；Some = 双栏（bg = 副栏）
+    pub split: Option<SplitView>,
     /// [v0.6 §16.6] 远程预过滤 pattern：Some 时命令尾接 | grep -E --line-buffered
     pub remote_prefilter: Option<String>,
     pub status_msg: String,
@@ -169,19 +200,14 @@ impl AppState {
         let presets: Vec<Preset> = config
             .presets
             .iter()
-            .map(|(key, pc)| Preset {
-                key: key.clone(),
-                name: pc.name.clone().unwrap_or_else(|| key.clone()),
-                level: pc.level.as_deref().and_then(parse_level),
-                since: pc.since.clone(),
-            })
+            .map(|(key, pc)| pc.to_preset(key))
             .collect();
 
         // remember_last_source（§8）：恢复模式 + 自动连接目标
         let mut autostart = None;
         let mut mode = ModeVariant::default();
-        let (mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints, mut st_ui_dedupe) =
-            (None, None, None, None);
+        let (mut st_ui_sidebar, mut st_ui_sparkline, mut st_ui_hints, mut st_ui_dedupe, mut st_ui_reverse) =
+            (None, None, None, None, None);
         if config.general.remember_last_source {
             if let Some(state) = load_state() {
                 if let Some(sid) = state.last_source.clone() {
@@ -202,6 +228,9 @@ impl AppState {
                 }
                 if let Some(v) = state.ui_dedupe {
                     st_ui_dedupe = Some(v);
+                }
+                if let Some(v) = state.ui_reverse {
+                    st_ui_reverse = Some(v);
                 }
             }
         }
@@ -239,8 +268,12 @@ impl AppState {
                 if let Some(v) = st_ui_dedupe {
                     ui.dedupe = v;
                 }
+                if let Some(v) = st_ui_reverse {
+                    ui.reverse = v;
+                }
                 ui
             },
+            split: None,
             config,
             autostart,
             pending: None,
@@ -368,6 +401,62 @@ impl AppState {
         }
     }
 
+    /// [v0.10.10] 分屏开关（w 键）：开 = 从已连接 tab 里找第一个非焦点源作副栏源
+    /// （没有则 None 占位）；关 = 回单栏。副栏跟随开启、滚动归零（新看一个流的心智）。
+    pub fn toggle_split(&mut self) {
+        if self.split.is_some() {
+            self.split = None;
+            self.status_msg = "分屏: 关（回单栏）".into();
+            return;
+        }
+        let active = self.active_source.clone();
+        let bg_source = self
+            .tabs
+            .iter()
+            .find(|t| Some(t.as_str()) != active.as_deref())
+            .cloned();
+        self.split = Some(SplitView {
+            bg: BgPane {
+                source: bg_source.clone(),
+                following: true,
+                scroll_y: 0,
+                scroll_x: 0,
+                selected_line_no: None,
+                cleared_before: None,
+                view_cache: ViewCache::default(),
+            },
+            bg_left: true,
+        });
+        self.last_rebuild += 1; // 副栏缓存本帧按需重建
+        self.status_msg = match bg_source {
+            Some(s) => format!("分屏: 开（副栏 = {s}；n 换栏，w 关闭）"),
+            None => "分屏: 开（副栏未连接——n 换焦点后 Tab 进侧栏选源连接）".into(),
+        };
+    }
+
+    /// [v0.10.10] 换栏（n 键）：焦点栏（既有全局字段）与副栏内容整体互换，
+    /// 两栏屏幕位置不变（bg_left 翻转）。缓存随栏走，last_rebuild+1 下帧按需重建。
+    pub fn swap_panes(&mut self) {
+        let Some(sp) = self.split.as_mut() else {
+            self.status_msg = "未开分屏（w 开启）".into();
+            return;
+        };
+        let bg = &mut sp.bg;
+        std::mem::swap(&mut self.active_source, &mut bg.source);
+        std::mem::swap(&mut self.following, &mut bg.following);
+        std::mem::swap(&mut self.viewport.scroll_y, &mut bg.scroll_y);
+        std::mem::swap(&mut self.viewport.scroll_x, &mut bg.scroll_x);
+        std::mem::swap(&mut self.selected_line_no, &mut bg.selected_line_no);
+        std::mem::swap(&mut self.cleared_before, &mut bg.cleared_before);
+        std::mem::swap(&mut self.view_cache, &mut bg.view_cache);
+        sp.bg_left = !sp.bg_left;
+        self.last_rebuild += 1;
+        self.status_msg = match self.active_source.as_deref() {
+            Some(sid) => format!("焦点栏 → {sid}"),
+            None => "焦点栏 → 未连接占位栏".into(),
+        };
+    }
+
     /// 记住 UI 设置与当前源/模式（退出时调用）。
     /// [v0.9] UI 设置无条件持久化；源/模式仍受 remember_last_source 门控。
     pub fn persist_state(&self) {
@@ -390,17 +479,8 @@ impl AppState {
             ui_sparkline: Some(self.ui.show_sparkline),
             ui_hints: Some(self.ui.show_hints),
             ui_dedupe: Some(self.ui.dedupe),
+            ui_reverse: Some(self.ui.reverse),
         });
-    }
-}
-
-fn parse_level(s: &str) -> Option<LevelFilter> {
-    match s.to_lowercase().as_str() {
-        "error" => Some(LevelFilter::Error),
-        "warn" | "warning" => Some(LevelFilter::Warn),
-        "info" => Some(LevelFilter::Info),
-        "debug" => Some(LevelFilter::Debug),
-        _ => None,
     }
 }
 
@@ -644,30 +724,13 @@ pub fn export_active_session(st: &AppState) -> anyhow::Result<std::path::PathBuf
 // [core 化] export_session 移至 logtail-core/src/log/buffer.rs（TUI `e` 键与 GUI 导出共用），
 // 经 use logtail_core::log::export_session 引入。
 
-/// [v0.7] 时间轴 sparkline：以最新带时间戳的行对齐末端，按 bucket_secs 分桶计行数。
-/// 距末端超过 width 个桶的旧行丢弃；无时间戳的行不计入。
-pub fn sparkline(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<u64> {
-    let mut end = None;
-    for l in buf.iter() {
-        if let Some(ts) = l.timestamp {
-            end = Some(match end {
-                Some(e) if e >= ts => e,
-                _ => ts,
-            });
-        }
-    }
-    let mut v = vec![0u64; width];
-    let Some(end) = end else { return v };
-    for l in buf.iter() {
-        if let Some(ts) = l.timestamp {
-            let from_end = (end - ts).num_seconds().max(0) / bucket_secs;
-            if let Some(idx) = width.checked_sub(1 + from_end as usize) {
-                v[idx] += 1;
-            }
-        }
-    }
-    v
-}
+// [v0.10 core 化] sparkline 移至 logtail-core/src/log/mod.rs（TUI 工具栏与 GUI 通用）；
+// re-export 保持 `logtail_tui::app::sparkline` 路径兼容（含本文件测试）。
+pub use logtail_core::log::sparkline;
+
+// [v0.10 core 化] L 键前移规则 next_earlier_mode（含 double_duration/extend_range）
+// 移至 logtail-core/src/source/mod.rs；re-export 保持路径兼容（含本文件测试）。
+pub use logtail_core::source::next_earlier_mode;
 
 /// [v0.6 §16.6] P 键：把当前本地过滤推到远端（显式警示注入面，§16.6）。
 /// 开 = 取 Active 过滤的 pattern → 校验 → 重连（命令尾接 | grep）；关 = 清除 → 重连。
@@ -748,6 +811,13 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
                 // （按实际入缓行数顶，不按批内原始行数——多行记录拆分后会多出行）
                 if !st.following && st.active_source.as_deref() == Some(sid) {
                     st.viewport.scroll_y = st.viewport.scroll_y.saturating_add(pushed as u16);
+                }
+                // [v0.10.10] 分屏副栏的暂停钉窗：与焦点栏同一逻辑逐栏生效
+                // （2021 edition 无 let-chains，用嵌套 if）
+                if let Some(sp) = st.split.as_mut() {
+                    if sp.bg.source.as_deref() == Some(sid) && !sp.bg.following {
+                        sp.bg.scroll_y = sp.bg.scroll_y.saturating_add(pushed as u16);
+                    }
                 }
                 budget = budget.saturating_sub(n);
                 st.last_rebuild += 1; // 批粒度 +1：视图每帧最多重建一次
@@ -832,7 +902,11 @@ async fn connect_source(st: &mut AppState, sid: &str) {
                 .or_insert_with(|| LogBuffer::new(max_lines));
             st.session_states
                 .insert(sid.to_string(), SessionState::Streaming);
-            st.status_msg = format!("已连接 {sid}（{}）", mode.label());
+            st.status_msg = if st.split.is_some() {
+                format!("已连接 {sid}（{}）——已进焦点栏（n 换栏）", mode.label())
+            } else {
+                format!("已连接 {sid}（{}）", mode.label())
+            };
         }
         Ok(Err(e)) => {
             st.session_states
@@ -866,24 +940,14 @@ async fn do_connect(
     mode: &ModeVariant,
     prefilter: Option<&String>,
 ) -> Result<ActiveSession> {
-    let handle = logtail_core::ssh::connect(&srv.host, srv.port, &srv.user, &srv.auth).await?;
+    // [v0.10.9] Keyring 认证在此解析成 Password（§16.3）：密码只进 russh/命令，
+    // 不进 TUI 状态；解析失败（缺条目等）走既有连接失败路径，可按 R 重试
+    let auth = srv.resolved_auth()?;
+    let handle = logtail_core::ssh::connect(&srv.host, srv.port, &srv.user, &auth).await?;
     let mut cmd = src.to_command(mode)?;
-    // [v0.7.7/v0.8.1] sudo 前缀（server 级开关）；密码模式：
-    // sudo_password 未填时复用 auth.password（sudo 密码=登录密码的常见场景）
-    let sudo_pw: Option<String> = if srv.sudo {
-        Some(
-            srv.sudo_password
-                .clone()
-                .or_else(|| match &srv.auth {
-                    logtail_core::config::AuthCfg::Password { password } => Some(password.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-        )
-        .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
+    // [v0.7.7/v0.8.1→v0.10.9] sudo 前缀（server 级开关）；密码解析收口到 core
+    // resolved_sudo_password：显式 sudo_password 优先，否则复用登录密码（Keyring 同走密钥环）
+    let sudo_pw = srv.resolved_sudo_password()?;
     if srv.sudo {
         cmd = with_sudo(&cmd, sudo_pw.as_deref());
     }
@@ -962,44 +1026,6 @@ async fn load_earlier(st: &mut AppState) {
     }
 }
 
-/// [v0.7] L 键的模式前移规则（纯函数，便于测试）
-fn next_earlier_mode(mode: &ModeVariant) -> Option<ModeVariant> {
-    match mode {
-        ModeVariant::Full => Some(ModeVariant::Quick {
-            since: Some("24h".into()),
-        }),
-        ModeVariant::Quick { since } => match since.as_deref() {
-            Some(s) => double_duration(s).map(|d| ModeVariant::Quick { since: Some(d) }),
-            None => Some(ModeVariant::Quick {
-                since: Some("24h".into()),
-            }),
-        },
-        // Range(s,u)：窗口向过去平移一个窗口宽度（u 不动，s 前移 Δ）
-        ModeVariant::Range(s, u) => extend_range(s, u),
-    }
-}
-
-/// "1h" → "2h"；"3d" → "6d"；未知格式 → None
-fn double_duration(s: &str) -> Option<String> {
-    let re = regex::Regex::new(r"^(\d+)([hmd])$").unwrap();
-    let caps = re.captures(s)?;
-    let n: u64 = caps[1].parse().ok()?;
-    Some(format!("{}{}", n.saturating_mul(2), &caps[2]))
-}
-
-/// [v0.7] Range 窗口前移：s 前移 (u-s) 的时长
-fn extend_range(s: &str, u: &str) -> Option<ModeVariant> {
-    use chrono::DateTime;
-    let s_t = DateTime::parse_from_rfc3339(s).ok()?;
-    let u_t = DateTime::parse_from_rfc3339(u).ok()?;
-    let delta = u_t - s_t;
-    if delta <= chrono::Duration::zero() {
-        return None;
-    }
-    let new_s = s_t - delta;
-    Some(ModeVariant::Range(new_s.to_rfc3339(), u.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(non_snake_case)]
@@ -1059,36 +1085,61 @@ mod tests {
         assert!(st.active_source.is_none());
     }
 
-    fn buf_with_ts(counts: &[(i64, u64)]) -> LogBuffer {
-        let mut b = LogBuffer::new(100);
-        let now = chrono::Utc::now();
-        for (ago, n) in counts {
-            for _ in 0..*n {
-                let mut l = logtail_core::log::LogLine {
-                    raw: "x".into(),
-                    ..Default::default()
-                };
-                l.timestamp = Some(now - chrono::Duration::seconds(*ago));
-                b.push(l);
-            }
-        }
-        b
+    #[test]
+    fn 分屏_开关换栏_状态随栏走() {
+        let mut st = state_with_tabs();
+        assert!(st.split.is_none());
+        st.toggle_split();
+        let sp = st.split.as_ref().unwrap();
+        assert_eq!(sp.bg.source.as_deref(), Some("b"), "副栏取第一个非焦点 tab");
+        assert!(sp.bg_left && sp.bg.following, "副栏默认在左、跟随开启");
+
+        // 焦点栏 a 的状态（暂停/滚动/选中）换栏后应随内容移到副栏
+        st.following = false;
+        st.viewport.scroll_y = 5;
+        st.selected_line_no = Some(42);
+        st.swap_panes();
+        assert_eq!(st.active_source.as_deref(), Some("b"), "焦点 → 原副栏源");
+        assert!(
+            st.following && st.viewport.scroll_y == 0,
+            "焦点栏继承原副栏的跟随态"
+        );
+        assert_eq!(st.selected_line_no, None, "原副栏无选中");
+        let sp = st.split.as_ref().unwrap();
+        assert_eq!(sp.bg.source.as_deref(), Some("a"), "原焦点栏变副栏");
+        assert!(
+            !sp.bg.following && sp.bg.scroll_y == 5,
+            "原焦点栏的暂停/滚动/选中随内容进副栏"
+        );
+        assert_eq!(sp.bg.selected_line_no, Some(42));
+        assert!(!sp.bg_left, "副栏换边（位置固定，内容互换）");
+
+        st.swap_panes();
+        st.toggle_split();
+        assert!(st.split.is_none(), "再按 w 关闭分屏");
     }
 
     #[test]
-    fn sparkline_按秒分桶_末端对齐最新() {
-        let b = buf_with_ts(&[(0, 3), (2, 5), (10, 1)]);
-        let v = sparkline(&b, 5, 1); // 覆盖 [now-5s, now]
-        assert_eq!(v[4], 3, "最新一秒 3 行");
-        assert_eq!(v[2], 5, "now-2s 桶 5 行");
-        assert_eq!(v[0], 0, "now-5s 桶为空");
-        // 无时间戳的 buffer → 全零
-        let mut b2 = LogBuffer::new(10);
-        b2.push(logtail_core::log::LogLine {
-            raw: "no-ts".into(),
-            ..Default::default()
-        });
-        assert!(sparkline(&b2, 5, 1).iter().all(|&c| c == 0));
+    fn drain_分屏副栏暂停钉窗() {
+        let mut st = state_with_tabs();
+        st.toggle_split(); // 副栏 = b
+        st.split.as_mut().unwrap().bg.following = false; // 副栏暂停
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tx.try_send(StreamEvent::Lines(vec!["l1".into(), "l2".into()]))
+            .unwrap();
+        let (stop_tx, _stop_rx) = tokio::sync::oneshot::channel();
+        st.connections.insert(
+            "b".into(),
+            ActiveSession {
+                handle: None,
+                stop_tx,
+                rx,
+            },
+        );
+        drain_session(&mut st, "b", 10);
+        let sp = st.split.as_ref().unwrap();
+        assert_eq!(sp.bg.scroll_y, 2, "副栏暂停：按实际入缓行数顶上去钉住");
+        assert_eq!(st.viewport.scroll_y, 0, "焦点栏（源 a）不受影响");
     }
 
     #[test]
@@ -1124,42 +1175,6 @@ mod tests {
         );
         assert_eq!(content.lines().count(), 3, "头部+2 行");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn 加载更早_三种模式的前移规则() {
-        use chrono::DateTime;
-        // Full → Quick(24h)
-        assert!(matches!(
-            next_earlier_mode(&ModeVariant::Full),
-            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
-        ));
-        // Quick 翻倍
-        assert!(matches!(
-            next_earlier_mode(&ModeVariant::Quick { since: Some("1h".into()) }),
-            Some(ModeVariant::Quick { since: Some(s) }) if s == "2h"
-        ));
-        assert!(matches!(
-            next_earlier_mode(&ModeVariant::Quick { since: None }),
-            Some(ModeVariant::Quick { since: Some(s) }) if s == "24h"
-        ));
-        // Range：窗口向过去平移一个窗口宽度
-        let m = next_earlier_mode(&ModeVariant::Range(
-            "2026-11-04T02:00:00+00:00".into(),
-            "2026-11-04T03:00:00+00:00".into(),
-        ));
-        match m {
-            Some(ModeVariant::Range(s, u)) => {
-                assert_eq!(u, "2026-11-04T03:00:00+00:00", "u 不动");
-                let s_t = DateTime::parse_from_rfc3339(&s).unwrap();
-                assert_eq!(
-                    s_t,
-                    DateTime::parse_from_rfc3339("2026-11-04T01:00:00+00:00").unwrap(),
-                    "s 前移一个窗口宽度"
-                );
-            }
-            other => panic!("应为 Range，实际 {other:?}"),
-        }
     }
 
     #[test]
