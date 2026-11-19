@@ -870,6 +870,8 @@ pub fn detect_level(text: &str) -> LogLevel {
 
 ### 5.4 时间戳与 docker JSON 包壳（修复 [v0.3 P1#6](#p16-时间戳优先级)）
 
+> **[v0.10.11] docker `--timestamps` 引擎前缀剥除**：`docker logs --timestamps`（§6.2 恒带）会在每行行首加引擎写入时刻（RFC3339Nano，恒带时区），应用日志里通常还有自己的本地时间——不剥会"双时间"显示。parse_line **先抽该前缀时间**（每行最可靠的时间来源），再把 raw 还原成与 `docker logs` 原样一致的真实行，列表/详情/复制/导出共用。JSON 壳拆出的 message 本无引擎前缀、不剥；应用自己打的本地时间（空格分隔、无时区）不误剥——`strip_docker_ts_prefix` 要求 T 分隔 + Z/±HH:MM 后缀才剥。
+
 ```rust
 pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
     let mut line = LogLine { raw, ..Default::default() };

@@ -39,24 +39,29 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
         ..Default::default()
     };
 
-    let dj_time = if src_type == SourceType::Docker {
-        match parse_docker_json(&line.raw) {
-            Some(p) => {
-                line.raw = p.message;
-                p.time
-            }
-            None => None,
+    let mut dj_time = None;
+    let mut was_json_shell = false;
+    if src_type == SourceType::Docker {
+        if let Some(p) = parse_docker_json(&line.raw) {
+            line.raw = p.message;
+            dj_time = p.time;
+            was_json_shell = true;
         }
-    } else {
-        None
-    };
+    }
 
     // [§19 限制①] 远端自带的颜色码（\x1b[31m…）在 ratatui 里会按字面渲染成乱码；
     // 级别检测/时间抽取也会被转义序列干扰。样式保留留给 anstyle-parse（v0.9），先做剥除。
     line.raw = strip_ansi(&line.raw);
+    // [v0.10.11] 时间先抽再剥：docker logs --timestamps 的引擎前缀（行首 RFC3339Nano，
+    // 恒带时区）是每行最可靠的时间来源，抽走后把 raw 还原成与 `docker logs` 原样一致的
+    // 真实行——列表/详情/复制/导出不再双时间。JSON 壳拆出的 message 本无引擎前缀，
+    // 不剥（应用自己打 RFC3339 时间戳时也不误伤）。
+    line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
+    if src_type == SourceType::Docker && !was_json_shell {
+        line.raw = strip_docker_ts_prefix(&line.raw).to_string();
+    }
     line.body = strip_ts_prefix(&line.raw).to_string();
     line.level = detect_level(&line.raw);
-    line.timestamp = dj_time.or_else(|| extract_timestamp(&line.raw));
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
 }
@@ -94,6 +99,22 @@ pub fn strip_ts_prefix(raw: &str) -> &str {
     lazy_static::lazy_static! {
         static ref RE: regex::Regex = regex::Regex::new(
             r"^[ ]?(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?|[A-Za-z]{3} +\d{1,2} \d{2}:\d{2}:\d{2}|\d{1,2}月 \d{1,2} \d{2}:\d{2}:\d{2})[ ]?"
+        ).unwrap();
+    }
+    match RE.find(raw) {
+        Some(m) if m.start() == 0 => &raw[m.end()..],
+        _ => raw,
+    }
+}
+
+/// [v0.10.11] docker logs --timestamps 引擎前缀剥除：行首 RFC3339Nano（T 分隔 +
+/// Z / ±HH:MM 时区后缀——引擎写入时刻，恒带时区）+ 一个空格。与 strip_ts_prefix
+/// 互补：要求 T 分隔与时区后缀才剥，应用自己打的本地时间（如
+/// `2026-11-18 14:28:08.329`，空格分隔无时区）不会被误剥。
+pub fn strip_docker_ts_prefix(raw: &str) -> &str {
+    lazy_static::lazy_static! {
+        static ref RE: regex::Regex = regex::Regex::new(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})[ ]?"
         ).unwrap();
     }
     match RE.find(raw) {
@@ -206,6 +227,86 @@ mod tests {
         let line = parse_line("plain output".into(), SourceType::Docker);
         assert_eq!(line.raw, "plain output");
         assert!(line.timestamp.is_none());
+    }
+
+    #[test]
+    fn docker引擎前缀_剥除后与docker_logs原样一致() {
+        // [v0.10.11] 真机形态：docker logs --timestamps 给每行加引擎前缀（UTC），
+        // 应用日志里还有自己的本地时间——显示/复制只保留真实行
+        let raw = "2026-11-18T06:28:08.329866927Z 2026-11-18 14:28:08.329 [scheduled-task-1] [] DEBUG c.i.y.SzcqTaskMapper.selectList - <==      Total: 0";
+        let line = parse_line(raw.into(), SourceType::Docker);
+        assert_eq!(
+            line.raw,
+            "2026-11-18 14:28:08.329 [scheduled-task-1] [] DEBUG c.i.y.SzcqTaskMapper.selectList - <==      Total: 0",
+            "引擎前缀剥掉，应用自己的时间戳保留"
+        );
+        assert_eq!(
+            line.body, "[scheduled-task-1] [] DEBUG c.i.y.SzcqTaskMapper.selectList - <==      Total: 0",
+            "折叠键剥应用时间戳（时间戳每行不同，进键会破坏折叠）"
+        );
+        let ts = line.timestamp.expect("引擎前缀时间");
+        assert_eq!(
+            ts.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            "2026-11-18 06:28:08.329866927",
+            "时间取自引擎前缀（UTC，不受本地 08:00 偏移影响）"
+        );
+        assert_eq!(line.level, LogLevel::Debug);
+        // 带时区偏移的引擎前缀（daemon 非 UTC 时）同样剥
+        let l2 = parse_line(
+            "2026-11-18T14:28:08.329866927+08:00 info line".into(),
+            SourceType::Docker,
+        );
+        assert_eq!(l2.raw, "info line");
+        assert!(l2.timestamp.is_some());
+    }
+
+    #[test]
+    fn docker_json壳_message不再剥引擎前缀() {
+        // [v0.10.11] JSON 壳拆出的 message 本无引擎前缀；应用自己打 RFC3339 时间戳
+        // 时不能被误剥
+        let raw = r#"{"log":"2026-01-05T14:02:04.123+08:00 db error: connection refused\n","stream":"stderr","time":"2026-01-05T06:02:04.123Z"}"#;
+        let line = parse_line(raw.into(), SourceType::Docker);
+        assert_eq!(line.raw, "2026-01-05T14:02:04.123+08:00 db error: connection refused");
+    }
+
+    #[test]
+    fn docker无前缀行_不误剥() {
+        // 多行记录的续行没有引擎前缀；应用本地时间戳（空格分隔无时区）也不匹配
+        let l1 = parse_line("at java.foo(Bar.java:1)".into(), SourceType::Docker);
+        assert_eq!(l1.raw, "at java.foo(Bar.java:1)");
+        let l2 = parse_line(
+            "2026-11-18 14:28:08.329 local ts line".into(),
+            SourceType::Docker,
+        );
+        assert_eq!(l2.raw, "2026-11-18 14:28:08.329 local ts line");
+    }
+
+    #[test]
+    fn strip_docker_ts_prefix_形态表() {
+        assert_eq!(
+            strip_docker_ts_prefix("2026-11-18T06:28:08.329866927Z abc"),
+            "abc"
+        );
+        assert_eq!(
+            strip_docker_ts_prefix("2026-11-18T06:28:08.329866927+08:00 abc"),
+            "abc"
+        );
+        assert_eq!(
+            strip_docker_ts_prefix("2026-11-18T06:28:08Z abc"),
+            "abc",
+            "纳秒为 0 时 RFC3339Nano 允许无小数部分"
+        );
+        assert_eq!(
+            strip_docker_ts_prefix("2026-11-18 14:28:08.329 abc"),
+            "2026-11-18 14:28:08.329 abc",
+            "空格分隔无时区 = 应用本地时间，不剥"
+        );
+        assert_eq!(
+            strip_docker_ts_prefix("2026-11-18T06:28:08.329 abc"),
+            "2026-11-18T06:28:08.329 abc",
+            "T 分隔但无时区后缀，不剥"
+        );
+        assert_eq!(strip_docker_ts_prefix("plain output"), "plain output");
     }
 
     #[test]
