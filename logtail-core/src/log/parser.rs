@@ -60,7 +60,7 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
     if src_type == SourceType::Docker && !was_json_shell {
         line.raw = strip_docker_ts_prefix(&line.raw).to_string();
     }
-    line.body = strip_ts_prefix(&line.raw).to_string();
+    line.refresh_body(); // [v0.10.8] body 不再存副本，记 raw 内后缀区间
     line.level = detect_level(&line.raw);
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
@@ -83,7 +83,7 @@ pub fn parse_line_multi(raw: String, src_type: SourceType) -> Vec<LogLine> {
                 raw: s.to_string(),
                 ..Default::default()
             };
-            l.body = strip_ts_prefix(s).to_string();
+            l.refresh_body(); // [v0.10.8] raw 已定稿，按后缀区间记 body
             l.level = detect_level(s);
             l.timestamp = head.timestamp.or_else(|| extract_timestamp(s));
             l.trace_id = extract_trace_id(s);
@@ -241,7 +241,7 @@ mod tests {
             "引擎前缀剥掉，应用自己的时间戳保留"
         );
         assert_eq!(
-            line.body, "[scheduled-task-1] [] DEBUG c.i.y.SzcqTaskMapper.selectList - <==      Total: 0",
+            line.body(), "[scheduled-task-1] [] DEBUG c.i.y.SzcqTaskMapper.selectList - <==      Total: 0",
             "折叠键剥应用时间戳（时间戳每行不同，进键会破坏折叠）"
         );
         let ts = line.timestamp.expect("引擎前缀时间");

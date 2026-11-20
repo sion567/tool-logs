@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Color32, Context, Key, RichText, ScrollArea, Sense, TextEdit, ViewportCommand,
+    self, Color32, Context, Key, MenuBar, RichText, ScrollArea, Sense, TextEdit, ViewportCommand,
     WindowLevel,
 };
 
@@ -31,7 +31,7 @@ const HIT_BG: Color32 = Color32::from_rgb(255, 243, 166);
 const SEL_BG: Color32 = Color32::from_rgb(204, 228, 255);
 /// 状态/告警色（浅底可读）
 const WARN_FG: Color32 = Color32::from_rgb(176, 106, 0);
-const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
+pub(crate) const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
 /// [v0.1.6] 行详情条底色（浅灰，与日志区区分）
 const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
 /// [v0.1.6] 详情条次要信息（时间/源）颜色
@@ -46,6 +46,11 @@ const DETAIL_BAR_H: f32 = 150.0;
 const PANE_GAP: f32 = 10.0;
 /// [v0.2.0] 「复制上下文」按钮携带的行数（同 TUI C 键 ±5）
 const DETAIL_CONTEXT: i64 = 5;
+/// [v0.2.4] 单按钮 tab 的关闭区宽 / 高（自绘 pill 布局基准）
+const TAB_CLOSE_W: f32 = 16.0;
+const TAB_H: f32 = 22.0;
+/// [v0.2.4] tab 标题最大宽（超出裁剪，悬停看全名）
+const TAB_MAX_W: f32 = 220.0;
 
 pub struct LogTailApp {
     pub prefs: Prefs,
@@ -58,12 +63,14 @@ pub struct LogTailApp {
     pub first_frame: bool,
     /// 启动参数 + 拖拽进来的文件（首帧统一打开）
     pending_files: Vec<String>,
-    remote_cfg: Option<Config>,
-    remote_cfg_err: Option<String>,
+    pub(crate) remote_cfg: Option<Config>,
+    pub(crate) remote_cfg_err: Option<String>,
     /// 连接源对话框开关
     show_connect: bool,
     /// 每帧落盘去抖
     prefs_dirty: bool,
+    /// [v0.2.4] 服务器/源/预设管理窗口（manage.rs）
+    pub(crate) manage: crate::manage::ManageState,
 }
 
 impl LogTailApp {
@@ -74,7 +81,7 @@ impl LogTailApp {
             active: 0,
             next_id: 1,
             pump: crate::pump::spawn(),
-            status: "打开文件… 或把 .log 拖进窗口；「连接源…」看 config.toml 里的远程源".into(),
+            status: "「文件 → 打开文件」或把 .log 拖进窗口；「文件 → 连接源」看 config.toml 里的远程源".into(),
             font_ok,
             first_frame: true,
             pending_files: initial_files,
@@ -82,6 +89,7 @@ impl LogTailApp {
             remote_cfg_err: None,
             show_connect: false,
             prefs_dirty: false,
+            manage: crate::manage::ManageState::default(),
         }
     }
 
@@ -123,7 +131,7 @@ impl LogTailApp {
                             .find_map(|l| l.raw.contains("[连接失败]").then(|| l.raw.clone()));
                         if let Some(msg) = fail_msg {
                             t.state = SessionState::Failed;
-                            t.follow = false;
+                            t.user_set_follow(false);
                             self.status = format!("{}：{}（按「重连」再试）", t.title, msg);
                         } else if t.total_pushed == 0 {
                             t.state = SessionState::Failed;
@@ -131,7 +139,7 @@ impl LogTailApp {
                                 format!("{}：连接失败（无数据），按「重连」再试", t.title);
                         } else {
                             t.state = SessionState::Ended;
-                            t.follow = false;
+                            t.user_set_follow(false);
                             self.status = format!("{}：会话已结束（远端命令退出）", t.title);
                         }
                     }
@@ -181,7 +189,7 @@ impl LogTailApp {
         self.status = "已关闭".into();
     }
 
-    fn ensure_remote_cfg(&mut self) {
+    pub(crate) fn ensure_remote_cfg(&mut self) {
         if self.remote_cfg.is_none() && self.remote_cfg_err.is_none() {
             match logtail_core::config::load() {
                 Ok(c) => self.remote_cfg = Some(c),
@@ -253,7 +261,7 @@ impl LogTailApp {
             t.id = new_id;
             t.state = SessionState::Connecting;
             t.clear();
-            t.follow = true;
+            t.user_set_follow(true); // [v0.2.4] 重连回最新端（manual_off 复位）
             t.h_scroll_x = 0.0;
             (old_id, Some(rc))
         };
@@ -396,6 +404,50 @@ impl LogTailApp {
                 self.open_local(&p.display().to_string());
             }
         }
+    }
+
+    /// [v0.2.4] 倒序开关（查看菜单）：全局偏好记忆 + 全部 tab 跳到新顺序的最新端
+    fn set_reverse(&mut self, reverse: bool) {
+        self.prefs.reverse = reverse;
+        self.prefs_dirty = true;
+        for t in &mut self.tabs {
+            t.user_set_follow(true);
+        }
+        self.status = if reverse {
+            "倒序显示：开（最新在顶；跟随=钉住顶部）".into()
+        } else {
+            "倒序显示：关（时间正序）".into()
+        };
+    }
+
+    /// [v0.2.4] 行数上限（设置菜单有界档位）：偏好记忆 + 全部已开 tab 即时生效。
+    /// 不开放任意值——缓冲是内存窗口，档位上限 5 万行足够大且内存可控。
+    fn set_max_lines(&mut self, n: usize) {
+        self.prefs.max_lines = n;
+        self.prefs_dirty = true;
+        for t in &mut self.tabs {
+            t.apply_max_lines(n);
+        }
+        self.status = format!("行数上限已改为 {n} 行（已开 tab 即时生效，超出部分淘汰最旧）");
+    }
+
+    /// [v0.2.4] 用系统文本编辑器打开 config.toml（远程源/服务器/预设）。
+    /// 无文件时先经 load() 生成模板；打开后丢弃缓存，下次连接源对话框重读磁盘。
+    fn edit_config_toml(&mut self) {
+        self.ensure_remote_cfg();
+        self.remote_cfg = None;
+        self.remote_cfg_err = None;
+        let path = logtail_core::config::config_dir().join("config.toml");
+        open_in_text_editor(&path);
+        self.status = format!("已用系统编辑器打开 {}（改完重开「连接源」即生效）", path.display());
+    }
+
+    /// [v0.2.4] 文件管理器打开配置目录（config.toml / gui.toml / 排障日志所在处）
+    fn open_config_dir(&mut self) {
+        let dir = logtail_core::config::config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        reveal_in_file_manager(&dir);
+        self.status = format!("已打开配置目录 {}", dir.display());
     }
 
     fn active_tab_idx(&self) -> Option<usize> {
@@ -588,12 +640,14 @@ impl eframe::App for LogTailApp {
     /// UI 段：所有面板（egui 0.37：面板挂在根 Ui 上，不再各自拿 ctx）
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.menu_bar(ui);
         self.tab_bar(ui);
         self.toolbar(ui);
         self.spark_bar(ui);
         self.log_area(ui);
         self.status_bar(ui);
         self.connect_dialog(&ctx);
+        self.manage_window(&ctx);
         self.handle_dnd(&ctx);
         self.handle_shortcuts(&ctx);
     }
@@ -602,7 +656,194 @@ impl eframe::App for LogTailApp {
 // ---------- 面板 ----------
 
 impl LogTailApp {
-    /// tab 栏：标签（状态符 + 关闭）+ 激活源详情（完整路径 / 服务器身份）
+    /// [v0.2.4] 顶部菜单栏：低频操作收进菜单（窗口窄不换行），正则/过滤留在操作区
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("menubar").show(ui, |ui| {
+            MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("文件", |ui| {
+                    if ui.button("＋ 打开文件…").clicked() {
+                        self.pick_files();
+                        ui.close();
+                    }
+                    if ui.button("⛓ 连接源…").clicked() {
+                        self.ensure_remote_cfg();
+                        self.show_connect = true;
+                        ui.close();
+                    }
+                    ui.separator();
+                    let has_tab = self.active_tab_idx().is_some();
+                    if ui.add_enabled(has_tab, egui::Button::new("导出…")).clicked() {
+                        self.export_active();
+                        ui.close();
+                    }
+                    if ui.add_enabled(has_tab, egui::Button::new("清屏")).clicked() {
+                        let ti = self.active_tab_idx().expect("has_tab 已保证存在");
+                        self.tabs[ti].clear();
+                        self.status = "已清屏".into();
+                        ui.close();
+                    }
+                    let remote_live = self.active_tab_idx().is_some_and(|ti| {
+                        matches!(self.tabs[ti].kind, TabKind::Remote(_))
+                    });
+                    if ui
+                        .add_enabled(remote_live, egui::Button::new("↻ 重连"))
+                        .on_hover_text("远程源专用：按当前模式与远筛重开会话")
+                        .clicked()
+                    {
+                        self.reconnect_active();
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(has_tab, egui::Button::new("关闭当前 tab")).clicked() {
+                        let ti = self.active_tab_idx().expect("has_tab 已保证存在");
+                        self.close_tab(ti);
+                        ui.close();
+                    }
+                    if ui.button("退出").clicked() {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("查看", |ui| {
+                    // [v0.2.4] 日志级别阈值（原操作行的级别选择移入；作用于激活 tab）
+                    if let Some(ti) = self.active_tab_idx() {
+                        let cur = self.tabs[ti].level;
+                        ui.menu_button(format!("日志级别：{}", cur.label()), |ui| {
+                            ui.set_min_width(120.0);
+                            for lf in [
+                                LevelFilter::All,
+                                LevelFilter::Error,
+                                LevelFilter::Warn,
+                                LevelFilter::Info,
+                                LevelFilter::Debug,
+                            ] {
+                                if ui.radio(cur == lf, lf.label()).clicked() {
+                                    self.tabs[ti].level = lf;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    } else {
+                        ui.label(RichText::new("日志级别（无激活 tab）").weak());
+                    }
+                    let mut reverse = self.prefs.reverse;
+                    if ui
+                        .checkbox(&mut reverse, "倒序显示（最新在顶）")
+                        .on_hover_text("开 = 最新在顶，跟随=钉住顶部；关闭 = 时间正序")
+                        .changed()
+                    {
+                        self.set_reverse(reverse);
+                    }
+                    let mut split = self.prefs.split;
+                    if ui
+                        .add_enabled(
+                            self.tabs.len() >= 2,
+                            egui::Checkbox::new(&mut split, "分屏（与下一个 tab 并排）"),
+                        )
+                        .changed()
+                    {
+                        self.prefs.split = split;
+                        self.prefs_dirty = true;
+                    }
+                    let mut dedupe = self.prefs.dedupe;
+                    if ui
+                        .checkbox(&mut dedupe, "折叠相似行")
+                        .on_hover_text("相邻且消息体相同（剥时间戳后）的行合并为一行，行尾 ×N；\n日志行内容各不相同时看不到变化")
+                        .changed()
+                    {
+                        self.prefs.dedupe = dedupe;
+                        self.prefs_dirty = true;
+                    }
+                    let mut spark = self.prefs.show_sparkline;
+                    if ui
+                        .checkbox(&mut spark, "日志量时间轴")
+                        .on_hover_text("日志区上方的按秒密度条；点击/拖动可定位到对应时间")
+                        .changed()
+                    {
+                        self.prefs.show_sparkline = spark;
+                        self.prefs_dirty = true;
+                    }
+                    let mut aot = self.prefs.always_on_top;
+                    if ui.checkbox(&mut aot, "窗口置顶").changed() {
+                        self.prefs.always_on_top = aot;
+                        let level = if aot {
+                            WindowLevel::AlwaysOnTop
+                        } else {
+                            WindowLevel::Normal
+                        };
+                        ui.ctx().send_viewport_cmd(ViewportCommand::WindowLevel(level));
+                        self.prefs_dirty = true;
+                    }
+                });
+                ui.menu_button("设置", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("字号");
+                        if ui.small_button("A−").clicked() {
+                            self.prefs.font_size = (self.prefs.font_size - 1.0).max(9.0);
+                            self.prefs_dirty = true;
+                        }
+                        ui.label(format!("{:.0}", self.prefs.font_size));
+                        if ui.small_button("A＋").clicked() {
+                            self.prefs.font_size = (self.prefs.font_size + 1.0).min(30.0);
+                            self.prefs_dirty = true;
+                        }
+                    });
+                    ui.menu_button("行数上限", |ui| {
+                        ui.label(
+                            RichText::new("每个 tab 的内存缓冲行数（超出淘汰最旧）").weak(),
+                        );
+                        for n in [1_000, 2_000, 5_000, 10_000, 20_000, 50_000] {
+                            if ui.radio(self.prefs.max_lines == n, format!("{n} 行")).clicked()
+                            {
+                                self.set_max_lines(n);
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if ui
+                        .button("管理服务器与源…")
+                        .on_hover_text("在窗口里增删改 config.toml 的服务器/源/预设（自动备份 config.toml.bak）")
+                        .clicked()
+                    {
+                        self.ensure_remote_cfg();
+                        self.manage.open = true;
+                        ui.close();
+                    }
+                    // [v0.2.4] remember_last_source 开关（config.toml [general]，定点改写保留注释）
+                    if let Some(cfg) = self.remote_cfg.clone() {
+                        let mut rls = cfg.general.remember_last_source;
+                        if ui
+                            .checkbox(&mut rls, "启动恢复上次激活源")
+                            .on_hover_text("config.toml [general].remember_last_source；下次启动自动连上次的源")
+                            .changed()
+                        {
+                            self.set_remember_last_source(rls);
+                            ui.close();
+                        }
+                    } else {
+                        let mut off = false;
+                        ui.add_enabled(false, egui::Checkbox::new(&mut off, "启动恢复上次激活源"))
+                            .on_disabled_hover_text("config.toml 加载失败，无法修改");
+                    }
+                    ui.separator();
+                    if ui
+                        .button("编辑 config.toml…")
+                        .on_hover_text("用系统编辑器打开远程源/服务器/预设配置（进阶项走这里手改）；\n改完重开「连接源」对话框即生效")
+                        .clicked()
+                    {
+                        self.edit_config_toml();
+                        ui.close();
+                    }
+                    if ui.button("打开配置目录").clicked() {
+                        self.open_config_dir();
+                        ui.close();
+                    }
+                });
+            });
+        });
+    }
+
+    /// tab 栏：单按钮 tab（[v0.2.4] 状态符 + 源名 + × 一体自绘）+ 激活源详情
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("tabbar").show(ui, |ui| {
             ui.add_space(2.0);
@@ -610,25 +851,19 @@ impl LogTailApp {
                 let mut activate: Option<usize> = None;
                 let mut close: Option<usize> = None;
                 for (i, t) in self.tabs.iter().enumerate() {
-                    let mark = match t.state {
-                        SessionState::Connecting => " ⋛",
-                        SessionState::Streaming => " ●",
-                        SessionState::Ended => " ■",
-                        SessionState::Failed => " ✗",
+                    let tooltip = match &t.kind {
+                        TabKind::Local { path } => format!(
+                            "{path} · {:.1} MB",
+                            t.file_size as f64 / (1024.0 * 1024.0)
+                        ),
+                        TabKind::Remote(r) => format!(
+                            "{}@{}:{} · {}",
+                            r.server.user, r.server.host, r.server.port, r.source_name
+                        ),
                     };
                     let is_active = i == self.active;
-                    let (click_tab, click_close) = ui
-                        .horizontal(|ui| {
-                            let click_tab = ui
-                                .selectable_label(
-                                    is_active,
-                                    RichText::new(format!("{}{mark}", t.title)),
-                                )
-                                .clicked();
-                            let click_close = ui.small_button("×").clicked();
-                            (click_tab, click_close)
-                        })
-                        .inner;
+                    let (click_tab, click_close) =
+                        draw_tab_button(ui, is_active, &t.title, t.state, &tooltip);
                     if click_tab && !is_active {
                         activate = Some(i);
                     }
@@ -645,7 +880,7 @@ impl LogTailApp {
                 // 激活源的详细信息（BareTail：文件身份跟在标签区）
                 let Some(ti) = self.active_tab_idx() else {
                     ui.label(
-                        RichText::new("（没有打开的日志——拖入 .log 文件或「＋ 打开文件…」）")
+                        RichText::new("（没有打开的日志——拖入 .log 文件或菜单「文件 → 打开文件」）")
                             .weak(),
                     );
                     return;
@@ -669,61 +904,22 @@ impl LogTailApp {
         });
     }
 
+    /// [v0.2.4] 操作行（精简后）：跟随/末尾 + 过滤/正则/清除（按需求留操作区）+
+    /// 级别 + 远程专属（模式/更早/远筛）；低频项已移入菜单栏
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                // 打开 / 连接（无 tab 时也要可用）
-                if ui.button("＋ 打开文件…").clicked() {
-                    self.pick_files();
-                }
-                if ui.button("⛓ 连接源…").clicked() {
-                    self.ensure_remote_cfg();
-                    self.show_connect = true;
-                }
-                ui.separator();
                 let Some(ti) = self.active_tab_idx() else {
                     return;
                 };
-                // 跟随 / 末尾 / 倒序（[v0.10.8] 倒序=最新在顶，全局偏好记忆）
+                // 跟随 / 末尾（[v0.2.4] 手动取消不再被「滚回边缘自动恢复」同帧翻回）
                 let mut follow = self.tabs[ti].follow;
                 if ui.checkbox(&mut follow, "跟随").changed() {
-                    self.tabs[ti].follow = follow;
-                    if follow {
-                        self.tabs[ti].jump_to_end = true;
-                        self.tabs[ti].pending_top_rows = 0; // 钉窗补偿作废
-                    }
+                    self.tabs[ti].user_set_follow(follow);
                 }
                 let jump_label = if self.prefs.reverse { "↑ 最新" } else { "↓ 末尾" };
                 if !follow && ui.button(jump_label).clicked() {
-                    self.tabs[ti].follow = true;
-                    self.tabs[ti].jump_to_end = true;
-                    self.tabs[ti].pending_top_rows = 0;
-                }
-                let mut reverse = self.prefs.reverse;
-                if ui.checkbox(&mut reverse, "倒序").changed() {
-                    self.prefs.reverse = reverse;
-                    self.prefs_dirty = true;
-                    // 切换行序后视图翻到另一端，全部 tab 跳到新顺序的最新端
-                    for t in &mut self.tabs {
-                        t.follow = true;
-                        t.jump_to_end = true;
-                        t.pending_top_rows = 0;
-                    }
-                    self.status = if reverse {
-                        "倒序显示：开（最新在顶；跟随=钉住顶部）".into()
-                    } else {
-                        "倒序显示：关（时间正序）".into()
-                    };
-                }
-                // [v0.10.10] 分屏（≥2 个 tab 才可用）：激活 tab 与下一 tab 并排，
-                // 两栏独立滚动/选中/跟随；工具栏与键盘仍作用于激活栏
-                let mut split = self.prefs.split;
-                if ui
-                    .add_enabled(self.tabs.len() >= 2, egui::Checkbox::new(&mut split, "分屏"))
-                    .changed()
-                {
-                    self.prefs.split = split;
-                    self.prefs_dirty = true;
+                    self.tabs[ti].user_set_follow(true);
                 }
                 ui.separator();
 
@@ -745,52 +941,6 @@ impl LogTailApp {
                 }
                 if let Some(err) = &self.tabs[ti].regex_error {
                     ui.colored_label(ERR_FG, format!("正则无效: {err}"));
-                }
-                ui.separator();
-
-                // 级别阈值
-                ui.label("级别:");
-                for lf in [
-                    LevelFilter::All,
-                    LevelFilter::Error,
-                    LevelFilter::Warn,
-                    LevelFilter::Info,
-                    LevelFilter::Debug,
-                ] {
-                    if ui
-                        .selectable_label(self.tabs[ti].level == lf, RichText::new(lf.label()))
-                        .clicked()
-                    {
-                        self.tabs[ti].level = lf;
-                    }
-                }
-                ui.separator();
-
-                // 显示设置（全局）；[v0.1.6] 换行勾选撤销——主视图固定单行，长行双击/右键看详情条
-                if ui.small_button("A−").clicked() {
-                    self.prefs.font_size = (self.prefs.font_size - 1.0).max(9.0);
-                    self.prefs_dirty = true;
-                }
-                if ui.small_button("A+").clicked() {
-                    self.prefs.font_size = (self.prefs.font_size + 1.0).min(30.0);
-                    self.prefs_dirty = true;
-                }
-                if ui.checkbox(&mut self.prefs.always_on_top, "置顶").changed() {
-                    let level = if self.prefs.always_on_top {
-                        WindowLevel::AlwaysOnTop
-                    } else {
-                        WindowLevel::Normal
-                    };
-                    ui.ctx()
-                        .send_viewport_cmd(ViewportCommand::WindowLevel(level));
-                    self.prefs_dirty = true;
-                }
-                // [v0.2.0] 折叠 ×N / 时间轴开关（持久化到 gui.toml）
-                if ui.checkbox(&mut self.prefs.dedupe, "折叠").changed() {
-                    self.prefs_dirty = true;
-                }
-                if ui.checkbox(&mut self.prefs.show_sparkline, "时间轴").changed() {
-                    self.prefs_dirty = true;
                 }
                 ui.separator();
 
@@ -845,9 +995,25 @@ impl LogTailApp {
                             None => self.status = "当前模式无法前移，请用预设指定时间窗".into(),
                         }
                     }
-                    // 远筛开关（同 TUI P 键）
+                    // 远筛开关（同 TUI P 键）——[v0.2.4] 空过滤词时禁用 + 悬停解释，
+                    // 修复「点了没反应」：之前只在状态栏写一句提示
                     let prefilter_on = self.tabs[ti].remote_prefilter.is_some();
-                    if ui.selectable_label(prefilter_on, "远筛").clicked() {
+                    let pat_empty = self.tabs[ti].filter_input.is_empty();
+                    let btn = egui::Button::new(RichText::new(if prefilter_on {
+                        "远筛 ✓"
+                    } else {
+                        "远筛"
+                    }))
+                    .small();
+                    if ui
+                        .add_enabled(prefilter_on || !pat_empty, btn)
+                        .on_hover_text(
+                            "远端预过滤（同 TUI P 键）：把过滤框关键词推到远端 | grep -E，\n\
+                             远端只回传匹配行（省带宽）；再点一次关闭",
+                        )
+                        .on_disabled_hover_text("先在过滤框输入关键词，再点远筛推到远端")
+                        .clicked()
+                    {
                         self.toggle_prefilter_active();
                     }
                     if let Some(p) = &self.tabs[ti].remote_prefilter {
@@ -860,15 +1026,13 @@ impl LogTailApp {
                     ui.separator();
                 }
 
-                // 操作
-                if ui.button("清屏").clicked() {
-                    self.tabs[ti].clear();
-                }
-                if ui.button("导出…").clicked() {
-                    self.export_active();
-                }
+                // 会话收尾后的快捷重连（正好在需要时出现；平时在菜单 文件 → 重连）
                 if matches!(self.tabs[ti].kind, TabKind::Remote { .. })
-                    && ui.button("重连").clicked()
+                    && matches!(
+                        self.tabs[ti].state,
+                        SessionState::Ended | SessionState::Failed
+                    )
+                    && ui.button("↻ 重连").clicked()
                 {
                     self.reconnect_active();
                 }
@@ -876,7 +1040,10 @@ impl LogTailApp {
         });
     }
 
-    /// [v0.2.0] 日志量时间轴细条（每秒一桶密度矩形，末端=最新；同 TUI sparkline）
+    /// [v0.2.0] 日志量时间轴细条（每秒一桶密度矩形，末端=最新；同 TUI sparkline）；
+    /// [v0.2.4] 定位滑块：点击/拖动按 x→时间→视图行跳转（显式导航，自动暂停跟随），
+    /// 悬停画光标竖线并提示对应时间。桶与 core::sparkline 同构：桶 i 覆盖
+    /// 「距末端 [width-1-i, width-i) 秒」。
     fn spark_bar(&mut self, ui: &mut egui::Ui) {
         if !self.prefs.show_sparkline {
             return;
@@ -889,9 +1056,9 @@ impl LogTailApp {
             let buckets = ((w / 6.0).floor() as usize).max(10);
             self.tabs[ti].refresh_spark(buckets);
             let spark = self.tabs[ti].spark.clone();
-            let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 14.0), Sense::hover());
-            resp.on_hover_text("日志量/秒（末端=最新）");
+            let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 16.0), Sense::click_and_drag());
             if spark.iter().all(|&c| c == 0) {
+                resp.on_hover_text("日志量/秒（暂无带时间戳的行）");
                 return;
             }
             let max = spark.iter().max().copied().unwrap_or(1).max(1);
@@ -907,6 +1074,37 @@ impl LogTailApp {
                 );
                 ui.painter().rect_filled(br, 0.0, SPARK_FG);
             }
+            // [v0.2.4] 悬停光标 + 时间提示；点击/拖动定位
+            let pointer = ui.input(|i| i.pointer.interact_pos());
+            let pos_in = pointer.filter(|p| r.contains(*p));
+            if let Some(p) = pos_in {
+                ui.painter().line_segment(
+                    [egui::pos2(p.x, r.top()), egui::pos2(p.x, r.bottom())],
+                    (1.0, WARN_FG),
+                );
+            }
+            let locating = resp.clicked() || resp.dragged();
+            if !(locating || resp.hovered()) {
+                return;
+            }
+            let Some(p) = pos_in else { return };
+            let frac = ((p.x - r.left()) / w).clamp(0.0, 0.999_9);
+            let secs_from_end = ((1.0 - frac) * buckets as f32).floor() as i64;
+            let ts = self.tabs[ti].spark_end.map(|end| {
+                let ts = end - chrono::Duration::seconds(secs_from_end);
+                (ts, ts.format("%m-%d %H:%M:%S").to_string())
+            });
+            if locating
+                && let Some((ts, _)) = ts
+                && let Some(no) = self.tabs[ti].locate_time(ts)
+            {
+                self.status = format!("时间轴定位到第 {no} 行（跟随已暂停，点「↓ 末尾」恢复）");
+            }
+            resp.on_hover_text(match ts {
+                Some((_, label)) if locating => format!("定位到 {label}（拖动可连续扫动）"),
+                Some((_, label)) => format!("日志量/秒（末端=最新）· 此处 {label}；点击/拖动定位"),
+                None => "日志量/秒（末端=最新）".into(),
+            });
         });
     }
 
@@ -918,8 +1116,8 @@ impl LogTailApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
                     ui.label(RichText::new("logtail-gui").size(22.0).strong());
-                    ui.label("「＋ 打开文件…」或把 .log 文件拖进窗口");
-                    ui.label("「⛓ 连接源…」连接 config.toml 里的远程源（SSH/docker/journalctl）");
+                    ui.label("菜单「文件 → ＋ 打开文件…」或把 .log 文件拖进窗口");
+                    ui.label("菜单「文件 → ⛓ 连接源…」连接 config.toml 里的远程源（SSH/docker/journalctl）");
                 });
                 return;
             };
@@ -994,7 +1192,7 @@ impl LogTailApp {
                         }
                         ui.label(RichText::new(level.label()).color(level_color(level)));
                         if !source.is_empty() {
-                            ui.label(RichText::new(source).color(DETAIL_MUTED));
+                            ui.label(RichText::new(source.as_ref()).color(DETAIL_MUTED));
                         }
                         if let Some(tid) = &trace {
                             ui.label(RichText::new(format!("trace: {tid}")).color(TRACE_FG));
@@ -1273,21 +1471,17 @@ impl LogTailApp {
             tab.clear_selection();
             self.status = "按 trace 过滤".into();
         }
-        if follow && !at_edge {
-            // 用户滚离最新端 → 暂停跟随（BareTail 行为；倒序=滚离顶部）；
-            // [v0.10.10] 副栏静默暂停（状态栏只反映焦点栏，避免两栏互相覆盖提示）
-            tab.follow = false;
-            if focused {
+        if let Some(tick) = tab.follow_tick(at_edge, max_off) {
+            // [v0.2.4] 状态机进 Tab（可单测）：手动取消（manual_off）后滚回边缘
+            // 不再自动恢复；滚离属自动暂停，滚回即恢复。
+            // 副栏静默（状态栏只反映焦点栏，避免两栏互相覆盖提示）
+            if focused && !tick {
                 self.status = if reverse {
                     format!("{}：已暂停跟随（滚回顶部或点「↑ 最新」恢复）", tab.title)
                 } else {
                     format!("{}：已暂停跟随（滚回底部或点「↓ 末尾」恢复）", tab.title)
                 };
             }
-        } else if !follow && at_edge && max_off > 0.0 {
-            // 滚回最新端 → 恢复跟随（倒序=滚回顶部；钉窗补偿随之作废）
-            tab.follow = true;
-            tab.pending_top_rows = 0;
         }
         if jump && at_edge {
             tab.jump_to_end = false; // 到位即收；未到位（新行涌入/尺寸变化）下一帧按新参数重试
@@ -1395,10 +1589,19 @@ impl LogTailApp {
                     return;
                 }
                 let Some(cfg) = cfg else { return };
+                // [v0.2.4] 管理入口：服务器/源/预设的增删改窗口
+                if ui
+                    .button("⚙ 管理服务器与源…")
+                    .on_hover_text("增删改 config.toml 的服务器/源/预设（自动备份）")
+                    .clicked()
+                {
+                    self.manage.open = true;
+                }
+                ui.separator();
                 if cfg.sources.is_empty() {
-                    ui.label("config.toml 里没有 [[sources]]。");
+                    ui.label("config.toml 里没有 [[sources]]——点上方「⚙ 管理服务器与源…」新增。");
                     ui.label(format!(
-                        "编辑 {} 添加服务器与源后重开本窗口。",
+                        "也可直接编辑 {} 后重开本窗口。",
                         logtail_core::config::config_dir()
                             .join("config.toml")
                             .display()
@@ -1483,4 +1686,122 @@ impl LogTailApp {
             self.open_remote(&sc);
         }
     }
+}
+
+// ---------- 自绘小部件 / 系统打开 ----------
+
+/// [v0.2.4] 单按钮 tab：`状态符 + 源名 + ×` 一体自绘 pill（原来标签与 × 是两个
+/// 独立控件）。点击主体激活、点击 × 区关闭；激活浅蓝底、悬停灰底、× 悬停变红。
+/// 返回 (点击主体, 点击 ×)。标题超 TAB_MAX_W 裁剪，全名看悬停提示。
+fn draw_tab_button(
+    ui: &mut egui::Ui,
+    active: bool,
+    title: &str,
+    state: SessionState,
+    tooltip: &str,
+) -> (bool, bool) {
+    let mark = match state {
+        SessionState::Connecting => " ⋛",
+        SessionState::Streaming => " ●",
+        SessionState::Ended => " ■",
+        SessionState::Failed => " ✗",
+    };
+    let mark_color = match state {
+        SessionState::Streaming => Color32::from_rgb(26, 122, 26),
+        SessionState::Connecting => Color32::from_rgb(176, 106, 0),
+        SessionState::Ended => Color32::GRAY,
+        SessionState::Failed => ERR_FG,
+    };
+    let font = egui::FontId::proportional(13.0);
+    let painter = ui.painter();
+    let mark_g = painter.layout_no_wrap(mark.into(), font.clone(), mark_color);
+    let mark_w = mark_g.size().x; // galley 会被 galley() 拿走所有权，宽度先取出
+    let title_color = if active { Color32::BLACK } else { Color32::from_rgb(60, 60, 60) };
+    let title_g = painter.layout_no_wrap(title.into(), font, title_color);
+    let pad = 8.0;
+    let w = (pad + mark_w + title_g.size().x + TAB_CLOSE_W + pad).min(TAB_MAX_W);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, TAB_H), Sense::click());
+    let resp = resp.on_hover_text(tooltip);
+
+    // 底色：激活浅蓝 / 悬停浅灰
+    let bg = if active {
+        SEL_BG
+    } else if resp.hovered() {
+        Color32::from_rgb(230, 230, 230)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
+
+    // 状态符 + 标题（标题区裁剪，超宽不出界）
+    let text_x = rect.left() + pad;
+    ui.painter().galley(
+        egui::pos2(text_x, rect.center().y - mark_g.size().y / 2.0),
+        mark_g,
+        mark_color,
+    );
+    let title_x = text_x + mark_w + 2.0;
+    let title_w = rect.right() - TAB_CLOSE_W - title_x;
+    if title_w > 0.0 {
+        let clip = egui::Rect::from_min_size(
+            egui::pos2(title_x, rect.top()),
+            egui::vec2(title_w, TAB_H),
+        );
+        ui.painter()
+            .with_clip_rect(clip)
+            .galley(egui::pos2(title_x, rect.center().y - title_g.size().y / 2.0), title_g, title_color);
+    }
+
+    // × 区：整钮悬停时显现，自身悬停变红
+    let close_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - TAB_CLOSE_W, rect.top()),
+        egui::vec2(TAB_CLOSE_W, TAB_H),
+    );
+    let pointer = ui.input(|i| i.pointer.interact_pos());
+    let x_hover = pointer.is_some_and(|p| close_rect.contains(p));
+    let x_color = if x_hover {
+        ERR_FG
+    } else if resp.hovered() {
+        Color32::from_rgb(120, 120, 120)
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().text(
+        close_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        egui::FontId::proportional(13.0),
+        x_color,
+    );
+
+    // 命中：× 区点击关闭，其余区域点击激活
+    let mut click_tab = false;
+    let mut click_close = false;
+    if resp.clicked() {
+        match pointer {
+            Some(p) if close_rect.contains(p) => click_close = true,
+            _ => click_tab = true,
+        }
+    }
+    (click_tab, click_close)
+}
+
+/// [v0.2.4] 系统文本编辑器打开文件（设置菜单「编辑 config.toml」）
+fn open_in_text_editor(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("notepad").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").args(["-t", &path.display().to_string()]).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+/// [v0.2.4] 文件管理器打开目录（设置菜单「打开配置目录」）
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }

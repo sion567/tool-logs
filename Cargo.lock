@@ -2434,7 +2434,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "logtail-core"
-version = "0.10.7"
+version = "0.10.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "logtail-gui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2464,6 +2464,7 @@ dependencies = [
  "serde",
  "tokio",
  "toml",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]

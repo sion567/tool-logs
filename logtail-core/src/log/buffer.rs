@@ -27,11 +27,27 @@ impl LogBuffer {
     }
 
     /// 窗口内最小 line_no；空 buffer 取 next_no（此时任何查询都应落空）
-    fn front_no(&self) -> u64 {
+    /// [v0.10.8] pub：GUI 增量视图按它识别被淘汰的 view 头部项
+    pub fn front_no(&self) -> u64 {
         self.lines
             .front()
             .map(|l| l.line_no)
             .unwrap_or(self.next_no)
+    }
+
+    /// [v0.10.8] 下一个待分配 line_no（增量视图的水位基准）
+    pub fn next_no(&self) -> u64 {
+        self.next_no
+    }
+
+    /// [v0.10.8] 运行中调整容量（GUI 设置菜单改行数上限）：改阈值并立即截断
+    /// 超容量部分（淘汰最旧——push 每次只弹一行，只改阈值的话大窗口永远缩不下去）。
+    /// 视图层下次 ensure_view 按前移后的 front_no 修复头部项。
+    pub fn set_max(&mut self, max: usize) {
+        self.max = max.max(1);
+        while self.lines.len() > self.max {
+            self.lines.pop_front();
+        }
     }
 
     /// 返回赋给该行的 line_no（调用方可用于选中/命中缓存）
@@ -156,6 +172,39 @@ mod tests {
         assert_eq!(b.len(), 1, "容量 1：只留最新");
         assert!(b.by_line_no(no0).is_none());
         assert!(b.by_line_no(no1).is_some());
+    }
+
+    #[test]
+    fn set_max_缩容立即截断并保留最新() {
+        let mut b = LogBuffer::new(4);
+        for s in ["l0", "l1", "l2", "l3"] {
+            b.push(LogLine {
+                raw: s.into(),
+                ..Default::default()
+            });
+        }
+        b.set_max(2); // 立即截断最旧 2 行，保留最新
+        assert_eq!(b.len(), 2);
+        assert!(b.by_line_no(0).is_none() && b.by_line_no(1).is_none());
+        assert_eq!(b.by_line_no(2).unwrap().raw, "l2");
+        // 后续 push 按新容量正常淘汰
+        let no4 = b.push(LogLine {
+            raw: "l4".into(),
+            ..Default::default()
+        });
+        assert_eq!(b.len(), 2, "容量 2：push 一行淘汰一行");
+        assert!(b.by_line_no(2).is_none());
+        assert_eq!(b.by_line_no(no4).unwrap().raw, "l4");
+        b.set_max(0); // 防御：按容量 1 收敛
+        assert_eq!(b.len(), 1);
+        b.push(LogLine {
+            raw: "l5".into(),
+            ..Default::default()
+        });
+        assert_eq!(b.len(), 1);
+        // [v0.10.8] 水位访问器：增量视图基准
+        assert_eq!(b.next_no(), 6);
+        assert_eq!(b.front_no(), 5);
     }
 
     #[test]

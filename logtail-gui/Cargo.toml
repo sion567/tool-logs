@@ -1,6 +1,6 @@
 [package]
 name = "logtail-gui"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 description = "BareTail 风格的图形界面日志查看器（本地文件 + 远程源），复用 logtail-core 核心库"
 
@@ -10,6 +10,8 @@ rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "time", "sync", "macros"] }
 toml = "0.8"
+# GUI 管理 config.toml 用：改值/增删表时保留用户注释与排版
+toml_edit = "0.22"
 anyhow = "1"
 regex = "1"
 # 精准模式时间窗（now-1h）计算
@@ -17,4 +19,4 @@ chrono = "0.4"
 # Windows 上配置 wgpu 后端白名单（禁 Vulkan）用
 egui-wgpu = "0.37"
 # 复用 logtail-core 的本地 tail 泵（轮转自愈）/ 行解析 / 过滤 / SSH 连接
-logtail-core = { version = "0.10.7", path = "../logtail-core" }
+logtail-core = { version = "0.10.8", path = "../logtail-core" }

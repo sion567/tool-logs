@@ -1007,7 +1007,7 @@ mod tests {
                 ..Default::default()
             };
             l.source = "test-src".into();
-            l.body = format!("B{i:02}");
+            l.refresh_body(); // [v0.10.8] body 由 raw 派生（无时间戳前缀时 = raw）
             buf.push(l);
         }
         st.buffers.insert("test-src".into(), buf);

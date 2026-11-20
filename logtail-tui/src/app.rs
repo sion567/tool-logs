@@ -790,6 +790,7 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
         match ev {
             Ok(StreamEvent::Lines(lines)) => {
                 let sid_owned = sid.to_string(); // 批粒度分配一次（逐行 entry/to_string 是原先的热点）
+                let sid_arc: std::sync::Arc<str> = sid_owned.as_str().into(); // [v0.10.8] 行级 source 共享此份
                 let src_type = st.source_type_of(&sid_owned);
                 let n = lines.len();
                 let max_lines = st.config.general.max_buffer_lines;
@@ -802,7 +803,7 @@ pub fn drain_session(st: &mut AppState, sid: &str, budget: usize) -> DrainOutcom
                 for raw in lines {
                     // [v0.10.5] 拆壳后的多行记录拆成独立日志行（子行继承记录时间戳）
                     for mut line in parse_line_multi(raw, src_type) {
-                        line.source = sid_owned.clone(); // 逻辑源名（§5.1 详情面板显示用）
+                        line.source = sid_arc.clone(); // 逻辑源名（§5.1 详情面板显示用；[v0.10.8] Arc 引用计数，批内零分配）
                         buf.push(line);
                         pushed += 1;
                     }

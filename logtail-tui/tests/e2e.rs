@@ -97,7 +97,7 @@ async fn e2e_配置到缓冲区_docker_json链路() -> anyhow::Result<()> {
     );
     assert_eq!(l0.level, LogLevel::Error);
     assert!(l0.timestamp.is_some(), "包壳 time 必须被提取");
-    assert_eq!(l0.source, "docker-src", "逻辑源名随入栈写入");
+    assert_eq!(l0.source.as_ref(), "docker-src", "逻辑源名随入栈写入");
     let l1 = buf.by_line_no(1).unwrap();
     assert!(l1.raw.contains("plain info line"), "raw={}", l1.raw);
     assert_eq!(l1.level, LogLevel::Info);

@@ -428,7 +428,7 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, pa
                     let Some(prev) = buf.and_then(|b| b.by_line_no(slice[idx - 1 - group])) else {
                         break;
                     };
-                    if !line.body.is_empty() && prev.body == line.body && prev.level == line.level {
+                    if !line.body().is_empty() && prev.body() == line.body() && prev.level == line.level {
                         group += 1;
                     } else {
                         break;
@@ -456,7 +456,7 @@ fn render_logs(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState, pa
                     let Some(next) = buf.and_then(|b| b.by_line_no(slice[idx + group])) else {
                         break;
                     };
-                    if !line.body.is_empty() && next.body == line.body && next.level == line.level {
+                    if !line.body().is_empty() && next.body() == line.body() && next.level == line.level {
                         group += 1;
                     } else {
                         break;
@@ -954,9 +954,9 @@ mod tests {
         let mut l = logtail_core::log::LogLine {
             raw: "db error: timeout on connection".into(),
             level: logtail_core::log::LogLevel::Error,
-            body: "db error: timeout on connection".into(),
             ..Default::default()
         };
+        l.refresh_body(); // [v0.10.8] body 由 raw 派生（无时间戳前缀时 = raw）
         l.source = "test-src".into();
         buf.push(l);
         st.buffers.insert("test-src".into(), buf);
@@ -1036,17 +1036,18 @@ mod tests {
         for i in 0..4 {
             let mut l = logtail_core::log::LogLine {
                 raw: format!("2026-11-05T00:16:2{i}Z retry attempt"),
-                body: "retry attempt".into(), // 时间戳不同、消息体相同
                 ..Default::default()
             };
+            l.refresh_body(); // [v0.10.8] 派生后剥时间戳：消息体相同 → 折叠
             l.source = "test-src".into();
             buf.push(l);
         }
-        buf.push(logtail_core::log::LogLine {
+        let mut diff = logtail_core::log::LogLine {
             raw: "different".into(),
-            body: "different".into(),
             ..Default::default()
-        });
+        };
+        diff.refresh_body();
+        buf.push(diff);
         st.buffers.insert("test-src".into(), buf);
         st.last_rebuild += 1;
         let t = draw(&mut st);
@@ -1127,7 +1128,7 @@ mod tests {
                 ..Default::default()
             };
             l.source = "test-src".into();
-            l.body = format!("B{i:02}"); // 模拟 parse_line 填消息体（各行不同不折叠）
+            l.refresh_body(); // 模拟 parse_line 填消息体（各行不同不折叠）
             buf.push(l);
         }
         st.buffers.insert("test-src".into(), buf);
@@ -1162,7 +1163,7 @@ mod tests {
                 ..Default::default()
             };
             l.source = "test-src".into();
-            l.body = format!("B{i:02}"); // 各行不同不折叠
+            l.refresh_body(); // 各行不同不折叠
             buf.push(l);
         }
         st.buffers.insert("test-src".into(), buf);
@@ -1186,17 +1187,18 @@ mod tests {
         for i in 0..4 {
             let mut l = logtail_core::log::LogLine {
                 raw: format!("2026-11-05T00:16:2{i}Z retry attempt"),
-                body: "retry attempt".into(),
                 ..Default::default()
             };
+            l.refresh_body(); // [v0.10.8] body 由 raw 派生
             l.source = "test-src".into();
             buf.push(l);
         }
-        buf.push(logtail_core::log::LogLine {
+        let mut diff = logtail_core::log::LogLine {
             raw: "different".into(),
-            body: "different".into(),
             ..Default::default()
-        });
+        };
+        diff.refresh_body();
+        buf.push(diff);
         st.buffers.insert("test-src".into(), buf);
         st.ui.reverse = true;
         st.last_rebuild += 1;
@@ -1222,7 +1224,7 @@ mod tests {
                 ..Default::default()
             };
             l.source = "src-b".into();
-            l.body = tag.into(); // 各行不同不折叠
+            l.refresh_body(); // 各行不同不折叠
             buf2.push(l);
         }
         st.buffers.insert("src-b".into(), buf2);
@@ -1248,16 +1250,16 @@ mod tests {
         let mut buf = logtail_core::log::LogBuffer::new(10);
         let mut l = logtail_core::log::LogLine {
             raw: "AAAA".into(),
-            body: "AAAA".into(),
             ..Default::default()
         };
+        l.refresh_body(); // [v0.10.8] body 由 raw 派生
         l.source = "test-src".into();
         buf.push(l);
         let mut l2 = logtail_core::log::LogLine {
             raw: "BBBB-TAIL".into(),
-            body: "BBBB-TAIL".into(),
             ..Default::default()
         };
+        l2.refresh_body();
         l2.source = "test-src".into();
         buf.push(l2);
         st.buffers.insert("test-src".into(), buf);

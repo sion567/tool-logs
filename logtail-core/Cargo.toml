@@ -1,6 +1,6 @@
 [package]
 name = "logtail-core"
-version = "0.10.7"
+version = "0.10.8"
 edition = "2021"
 description = "logtail 核心库：SSH 连接 / 日志源命令构造 / 行解析与过滤 / 配置（不含任何 UI）"
 

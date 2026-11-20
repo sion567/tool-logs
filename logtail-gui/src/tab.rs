@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use eframe::egui;
 
-use logtail_core::log::filter::{FilterMode, LevelFilter, NO_FILTER, rebuild_view};
+use logtail_core::log::filter::{FilterMode, LevelFilter, NO_FILTER, matches_filter, rebuild_view};
 use logtail_core::log::parser::parse_line_multi;
 use logtail_core::log::{LogBuffer, LogLevel, sparkline};
 use logtail_core::source::{ModeVariant, SourceType};
@@ -50,6 +51,8 @@ pub struct Tab {
     pub id: u64,
     pub kind: TabKind,
     pub title: String,
+    /// [v0.2.4] title 的 Arc 形态：ingest 给每行挂 source 时引用计数，不再逐行分配
+    pub title_arc: Arc<str>,
     pub src_type: SourceType,
     pub buffer: LogBuffer,
     pub max_lines: usize,
@@ -75,6 +78,9 @@ pub struct Tab {
 
     // ---- 视图 ----
     pub follow: bool,
+    /// [v0.2.4] 用户手动取消了跟随（工具栏勾选/时间轴定位）——滚回边缘不自动恢复。
+    /// 修复：跟随默认钉在边缘，取消勾选会被「滚回边缘自动恢复」同帧翻回 true。
+    pub follow_manual_off: bool,
     /// 请求跳到末尾（勾选跟随/点「末尾」按钮时置位，渲染层消化后清）
     pub jump_to_end: bool,
     /// 上一帧日志区视口高度（精确跳底落点用）
@@ -84,7 +90,10 @@ pub struct Tab {
     pub sel_focus: Option<u64>,
     pub total_pushed: usize,
     pub view: Vec<u64>,
-    view_built_at: usize,
+    /// [v0.2.4] 增量视图水位：上次视图构建时 buffer 的 next_no（此后只处理新行）
+    built_next_no: u64,
+    /// [v0.2.4] clear()/爆量批后强制全量重建（clear 换新 buffer，水位语义失效）
+    view_dirty: bool,
     view_filter: Option<FilterMode>,
     view_level: LevelFilter,
     view_dedupe: bool,
@@ -96,6 +105,9 @@ pub struct Tab {
     pub spark: Vec<u64>,
     spark_width: usize,
     spark_built_at: usize,
+    /// [v0.2.4] spark 末端时间（最新带时间戳行）——时间轴滑块定位的时间基准，
+    /// 与 spark 同批构建（refresh_spark 内算好），二者恒一致
+    pub spark_end: Option<DateTime<Utc>>,
 
     /// [v0.2.0] 横向滚动像素偏移（←→ 长行平移，Home 复位）
     pub h_scroll_x: f32,
@@ -154,6 +166,7 @@ impl Tab {
     fn new(id: u64, kind: TabKind, src_type: SourceType, max_lines: usize) -> Self {
         let title = kind.label();
         Self {
+            title_arc: Arc::from(title.as_str()),
             id,
             kind,
             title,
@@ -171,13 +184,15 @@ impl Tab {
             compiled: None,
             level: LevelFilter::All,
             follow: true,
+            follow_manual_off: false,
             jump_to_end: false,
             last_inner_h: 0.0,
             selected: None,
             sel_focus: None,
             total_pushed: 0,
             view: Vec::new(),
-            view_built_at: usize::MAX,
+            built_next_no: 0,
+            view_dirty: false,
             view_filter: None,
             view_level: LevelFilter::All,
             view_dedupe: true,
@@ -185,6 +200,7 @@ impl Tab {
             spark: Vec::new(),
             spark_width: 0,
             spark_built_at: usize::MAX,
+            spark_end: None,
             h_scroll_x: 0.0,
             last_log_width: 0.0,
             detail_line: None,
@@ -209,7 +225,7 @@ impl Tab {
         let mut n = 0usize;
         for raw in lines {
             for mut line in parse_line_multi(raw, self.src_type) {
-                line.source = self.title.clone();
+                line.source = self.title_arc.clone(); // [v0.2.4] Arc 引用计数，逐行零分配
                 self.buffer.push(line);
                 n += 1;
             }
@@ -221,13 +237,21 @@ impl Tab {
     /// 清屏：缓冲清空，视图强制重建
     pub fn clear(&mut self) {
         self.buffer = LogBuffer::new(self.max_lines);
-        self.total_pushed += 1; // 强制 view 失效
+        self.total_pushed += 1;
         self.clear_selection();
         self.detail_line = None; // 行已不存在，详情条一并关闭
         self.view.clear();
         self.display.clear();
-        self.view_built_at = self.total_pushed;
+        self.view_dirty = true; // [v0.2.4] 换了新 buffer，水位语义失效 → 全量重建
         self.pending_top_rows = 0; // [v0.10.8] 缓冲已空，无需钉窗补偿
+    }
+
+    /// [v0.2.4] 设置菜单改行数上限（运行中生效）：缩容立即截断超容量部分，
+    /// 视图标记 dirty 强制全量重建（截断掉的头部行若不重建会留空行位）
+    pub fn apply_max_lines(&mut self, max_lines: usize) {
+        self.max_lines = max_lines.max(1);
+        self.buffer.set_max(self.max_lines);
+        self.view_dirty = true;
     }
 
     /// 当前选中区间（anchor 与 Shift 终点归一化为 (lo, hi) 含端点）；无选中 None
@@ -328,39 +352,155 @@ impl Tab {
         self.compiled.clone()
     }
 
-    /// 视图按需重建（每帧调用；命中缓存只在 总数/过滤/级别/折叠开关 变化时重算）。
-    /// [v0.2.0] dedupe 开 → 相邻同 body+level 行折叠进 display（语义同 TUI S 键）；
-    /// 关 → display 与 view 一一对应（count 恒 1，渲染层统一走 display 不分支）。
+    /// 视图按需重建（每帧调用）。[v0.2.4] 三段式：
+    /// 过滤词/级别/折叠开关变化或 dirty → 全量重建（rebuild_view + build_display）；
+    /// 仅新行到达 → 增量（淘汰修复 + 水位后追加，O(新行数)——正则过滤不再每帧全量重扫）；
+    /// 否则零开销。dedupe 开时 display 相邻同 body+level 折叠（语义同 TUI S 键），
+    /// 关时与 view 一一对应（count 恒 1，渲染层统一走 display 不分支）。
     pub fn ensure_view(&mut self, dedupe: bool) {
         let fm = self.active_filter();
-        if self.total_pushed != self.view_built_at
-            || self.view_filter != fm
+        let meta_changed = self.view_filter != fm
             || self.view_level != self.level
-            || self.view_dedupe != dedupe
-        {
+            || self.view_dedupe != dedupe;
+        if meta_changed || self.view_dirty {
             self.view = rebuild_view(&self.buffer, fm.as_ref().unwrap_or(&NO_FILTER), self.level);
             self.display = if dedupe {
                 build_display(&self.view, &self.buffer)
             } else {
                 self.view.iter().map(|&no| (no, 1)).collect()
             };
-            self.view_built_at = self.total_pushed;
             self.view_filter = fm;
             self.view_level = self.level;
             self.view_dedupe = dedupe;
+        } else if self.built_next_no != self.buffer.next_no() {
+            self.incremental_view(fm.as_ref().unwrap_or(&NO_FILTER), dedupe);
+        }
+        self.built_next_no = self.buffer.next_no();
+        self.view_dirty = false;
+    }
+
+    /// [v0.2.4] 增量视图：仅新行到达（过滤词/级别/折叠未变）时调用。
+    /// ① 前端淘汰修复：窗口前移挤掉 view 头部项，display 前部组按组内 view 项数
+    ///    收缩/整组删除（组内成员 = 连续 view 项，幸存成员代表行改为新 view 头）；
+    /// ② 水位追加：built_next_no..next_no 逐行 O(1) 反查 + 过滤匹配，view.push，
+    ///    display 末组同 body+level 则扩组，否则新组。
+    fn incremental_view(&mut self, fm: &FilterMode, dedupe: bool) {
+        let front = self.buffer.front_no();
+        let k = self.view.partition_point(|&no| no < front);
+        if k > 0 {
+            // 先数出被整组淘汰的组数 gi 与部分淘汰组的残余 rem，再同步收缩两个列表
+            let mut rem = k;
+            let mut gi = 0usize;
+            while rem > 0 && gi < self.display.len() {
+                let cnt = self.display[gi].1;
+                if cnt <= rem {
+                    rem -= cnt;
+                    gi += 1;
+                } else {
+                    break;
+                }
+            }
+            self.view.drain(0..k);
+            self.display.drain(0..gi);
+            // 部分淘汰组（rem < cnt）：幸存成员已是新 view 头，代表行随之下移
+            if rem > 0
+                && let Some(first) = self.view.first()
+                && let Some(g) = self.display.first_mut()
+            {
+                *g = (*first, g.1 - rem);
+            }
+        }
+        // ② 水位追加（爆量批超出容量的行已被淘汰，by_line_no 反查落空即跳过）
+        for no in self.built_next_no..self.buffer.next_no() {
+            let Some(l) = self.buffer.by_line_no(no) else {
+                continue;
+            };
+            if !self.level.matches(l) || !matches_filter(l, fm) {
+                continue;
+            }
+            self.view.push(no);
+            let extend = dedupe
+                && !l.body().is_empty()
+                && self.display.last().is_some_and(|g| {
+                    // 字段不相交的借用：读 display 尾组代表行与 buffer 不冲突
+                    self.buffer
+                        .by_line_no(g.0)
+                        .is_some_and(|rep| rep.level == l.level && rep.body() == l.body())
+                });
+            if extend {
+                let g = self.display.last_mut().expect("extend 分支必有末组");
+                g.1 += 1;
+            } else {
+                self.display.push((no, 1));
+            }
         }
     }
 
-    /// [v0.2.0] sparkline 按需刷新（宽度变化或视图重建后重算；core::sparkline 分桶）
+    /// [v0.2.0] sparkline 按需刷新（宽度变化或数据变化后重算；core::sparkline 分桶）；
+    /// [v0.2.4] 顺带记录 spark_end（最新带时间戳行）——时间轴滑块定位的时间基准，
+    /// 与 spark 同批产出恒一致。
     pub fn refresh_spark(&mut self, width: usize) {
         if width == 0 {
             return;
         }
         if width != self.spark_width || self.total_pushed != self.spark_built_at {
             self.spark = sparkline(&self.buffer, width, 1);
+            self.spark_end = self.buffer.iter().filter_map(|l| l.timestamp).max();
             self.spark_width = width;
             self.spark_built_at = self.total_pushed;
         }
+    }
+
+    /// [v0.2.4] 手动跟随开关（工具栏勾选/「末尾」按钮/时间轴定位）：取消时记
+    /// manual_off——滚回边缘不再自动恢复；开启则按精确落点跳端。
+    pub fn user_set_follow(&mut self, on: bool) {
+        self.follow = on;
+        self.follow_manual_off = !on;
+        if on {
+            self.jump_to_end = true;
+            self.pending_top_rows = 0; // 钉窗补偿作废
+        }
+    }
+
+    /// [v0.2.4] 跟随状态机（draw_log_pane 每帧调用）。返回 Some(true/false) =
+    /// 本帧发生了自动恢复/自动暂停（状态栏提示用），None = 无变化。
+    /// 自动暂停（滚离最新端）→ manual_off 清零，滚回边缘仍可自动恢复；
+    /// 手动取消（manual_off=true）→ 钉在边缘也不自动恢复。
+    pub fn follow_tick(&mut self, at_edge: bool, max_off: f32) -> Option<bool> {
+        if self.follow && !at_edge {
+            self.follow = false;
+            self.follow_manual_off = false;
+            return Some(false);
+        }
+        if !self.follow && at_edge && max_off > 0.0 && !self.follow_manual_off {
+            self.follow = true;
+            self.pending_top_rows = 0;
+            return Some(true);
+        }
+        None
+    }
+
+    /// [v0.2.4] 时间定位（时间轴滑块）：视图内首个时间戳 ≥ ts 的行。
+    /// view 按时间近单调升序（无时间戳行/继承子行可能局部乱序）→ 线性扫，
+    /// 1 万行点击/拖动级开销可忽略。命中即请求滚动定位并暂停跟随（显式导航，
+    /// 同手动取消——拖动期间不被「钉在边缘自动恢复」打架）。
+    pub fn locate_time(&mut self, ts: DateTime<Utc>) -> Option<u64> {
+        let hit = self
+            .view
+            .iter()
+            .copied()
+            .find(|&no| {
+                self.buffer
+                    .by_line_no(no)
+                    .and_then(|l| l.timestamp)
+                    .is_some_and(|t| t >= ts)
+            });
+        if let Some(no) = hit {
+            self.scroll_to_line = Some(no);
+            self.pending_top_rows = 0;
+            self.user_set_follow(false);
+        }
+        hit
     }
 
     /// [v0.2.0] line_no → display 行号（滚动定位用）：view 内定位（被过滤掉取插入点
@@ -404,7 +544,7 @@ fn build_display(view: &[u64], buf: &LogBuffer) -> Vec<(u64, usize)> {
             let Some(next) = buf.by_line_no(view[i + group]) else {
                 break;
             };
-            if !line.body.is_empty() && next.body == line.body && next.level == line.level {
+            if !line.body().is_empty() && next.body() == line.body() && next.level == line.level {
                 group += 1;
             } else {
                 break;
@@ -671,7 +811,7 @@ mod tests {
             "子行继承时间戳"
         );
         assert_eq!(t.buffer.by_line_no(1).unwrap().level, LogLevel::Error);
-        assert_eq!(t.buffer.by_line_no(1).unwrap().source, t.title);
+        assert_eq!(t.buffer.by_line_no(1).unwrap().source.as_ref(), t.title.as_str());
         assert_eq!(t.ingest(vec!["plain".into()]), 1, "单行批不受影响");
         assert_eq!(t.buffer.len(), 3);
         // 清屏连详情条一并关
@@ -813,5 +953,158 @@ mod tests {
             } if s == "2h"
         ));
         assert_eq!(t.remote_prefilter.as_deref(), Some("timeout"));
+    }
+
+    // ---- [v0.2.4] 增量视图 ----
+
+    /// 断言 tab 的 view/display 与全量重建（rebuild_view + build_display）完全一致
+    fn assert_view_matches_full_rebuild(t: &Tab, dedupe: bool, fm: &FilterMode) {
+        let want_view = rebuild_view(&t.buffer, fm, t.level);
+        assert_eq!(t.view, want_view, "view 与全量重建不一致");
+        let want_display = if dedupe {
+            build_display(&want_view, &t.buffer)
+        } else {
+            want_view.iter().map(|&no| (no, 1)).collect::<Vec<_>>()
+        };
+        assert_eq!(t.display, want_display, "display 与全量重建不一致");
+    }
+
+    #[test]
+    fn 增量视图_与全量重建等价_含爆量批淘汰() {
+        // 容量 5：首批 3 行建基线，爆量批 8 行把窗口整体前移，再单行追加
+        let mut t = Tab::new_local(1, "C:/logs/inc.log", 5);
+        t.ingest(vec!["l0".into(), "l1".into(), "l2".into()]);
+        t.ensure_view(false);
+        assert_view_matches_full_rebuild(&t, false, &NO_FILTER);
+        t.ingest((3..11).map(|i| format!("l{i}")).collect());
+        t.ensure_view(false);
+        assert_view_matches_full_rebuild(&t, false, &NO_FILTER);
+        assert_eq!(t.buffer.len(), 5, "爆量批后窗口满载");
+        assert_eq!(t.view.first(), Some(&6), "已淘汰行不再在视图头部（窗口存 l6..l10）");
+        t.ingest(vec!["l11".into()]);
+        t.ensure_view(false);
+        assert_view_matches_full_rebuild(&t, false, &NO_FILTER);
+    }
+
+    #[test]
+    fn 增量视图_跨批次折叠组扩展() {
+        let mut t = tab();
+        t.ingest(vec!["a".into(), "a".into()]);
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(0, 2)]);
+        // 新行与末组同 body → 扩组而非新组（增量路径）
+        t.ingest(vec!["a".into(), "b".into()]);
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(0, 3), (3, 1)]);
+        // 不同 body → 新组
+        t.ingest(vec!["a".into()]);
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(0, 3), (3, 1), (4, 1)]);
+        assert_view_matches_full_rebuild(&t, true, &NO_FILTER);
+    }
+
+    #[test]
+    fn 增量视图_前组部分淘汰() {
+        // 容量 4：4 行同 body 折成一组，再来 2 行把组头挤出窗口——
+        // 首组应收缩并换代表行（幸存成员成为新 view 头）
+        let mut t = Tab::new_local(1, "C:/logs/ev.log", 4);
+        t.ingest(vec!["a".into(), "a".into(), "a".into(), "a".into()]);
+        t.ensure_view(true);
+        assert_eq!(t.display, vec![(0, 4)]);
+        t.ingest(vec!["b".into(), "c".into()]);
+        t.ensure_view(true);
+        assert_view_matches_full_rebuild(&t, true, &NO_FILTER);
+        assert_eq!(
+            t.display,
+            vec![(2, 2), (4, 1), (5, 1)],
+            "首组剩 no=2,3 → 代表行换 2、×2"
+        );
+    }
+
+    #[test]
+    fn 增量视图_改过滤词回落全量() {
+        let mut t = tab();
+        t.ingest(vec!["alpha".into(), "beta".into(), "alpha again".into()]);
+        t.ensure_view(false);
+        assert_eq!(t.view.len(), 3);
+        t.filter_input = "alpha".into();
+        t.ensure_view(false);
+        assert_eq!(t.view, vec![0, 2], "过滤变化走全量重建");
+        assert_view_matches_full_rebuild(&t, false, &FilterMode::Text("alpha".into()));
+    }
+
+    #[test]
+    fn apply_max_lines_缩容截断并强制重建() {
+        let mut t = Tab::new_local(1, "C:/logs/cap.log", 10);
+        t.ingest((0..10).map(|i| format!("l{i}")).collect());
+        t.ensure_view(false);
+        assert_eq!(t.view.len(), 10);
+        t.apply_max_lines(4);
+        t.ensure_view(false);
+        assert_eq!(t.buffer.len(), 4, "缩容立即截断");
+        assert_eq!(t.view, vec![6, 7, 8, 9], "视图同步到幸存行，无空行位");
+        t.ingest(vec!["l10".into()]);
+        t.ensure_view(false);
+        assert_view_matches_full_rebuild(&t, false, &NO_FILTER);
+    }
+
+    // ---- [v0.2.4] 跟随状态机 / 时间定位 ----
+
+    #[test]
+    fn follow_tick_手动取消后不再自动恢复() {
+        let mut t = tab();
+        // 跟随中 + 在边缘：无变化
+        assert_eq!(t.follow_tick(true, 100.0), None);
+        // 手动取消：钉在边缘也不自动恢复（修复点）
+        t.user_set_follow(false);
+        assert!(!t.follow && t.follow_manual_off);
+        assert_eq!(t.follow_tick(true, 100.0), None);
+        // 重新勾选 → 立即跳端请求
+        t.user_set_follow(true);
+        assert!(t.follow && t.jump_to_end && !t.follow_manual_off);
+        // 自动暂停（滚离边缘）→ 滚回边缘自动恢复
+        assert_eq!(t.follow_tick(false, 100.0), Some(false));
+        assert!(!t.follow && !t.follow_manual_off, "滚离属自动暂停，manual_off 清零");
+        assert_eq!(t.follow_tick(true, 100.0), Some(true));
+        assert!(t.follow);
+        // 内容不满一屏（max_off=0）不触发恢复
+        t.user_set_follow(false);
+        assert_eq!(t.follow_tick(true, 0.0), None);
+    }
+
+    #[test]
+    fn locate_time_命中首个不早于目标的视图行() {
+        let mut t = tab();
+        t.ingest(vec![
+            "2026-11-07 10:00:00 INFO x".into(),
+            "2026-11-07 10:00:05 INFO y".into(),
+            "2026-11-07 10:00:10 INFO z".into(),
+            "plain no ts".into(), // 无时间戳行：不参与定位
+        ]);
+        t.ensure_view(false);
+        let ts = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let base = ts("2026-11-07T10:00:00Z");
+        // 目标落两行之间 → 命中后一行
+        assert_eq!(t.locate_time(base + chrono::Duration::seconds(4)), Some(1));
+        assert!(!t.follow, "定位即暂停跟随（显式导航）");
+        assert!(t.scroll_to_line == Some(1));
+        // 早于全部 → 首行；晚于全部 → None（滑块端点由 UI 层钳到 spark_end 内）
+        assert_eq!(t.locate_time(base - chrono::Duration::hours(1)), Some(0));
+        assert_eq!(
+            t.locate_time(ts("2026-11-07T10:00:10Z") + chrono::Duration::seconds(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn refresh_spark_记录末端时间戳() {
+        let mut t = tab();
+        t.ingest(vec!["2026-11-07 10:00:00 INFO x".into(), "plain".into()]);
+        t.refresh_spark(8);
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-11-07T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(t.spark_end, Some(ts), "最新带时间戳行的时间");
+        assert_eq!(t.spark.len(), 8);
     }
 }
