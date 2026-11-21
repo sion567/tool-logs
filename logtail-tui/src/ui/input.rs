@@ -439,6 +439,8 @@ pub fn handle_filter_key(key: KeyEvent, st: &mut AppState) {
                 let text = match &fm {
                     FilterMode::Text(t) | FilterMode::Regex(_, t) => t.clone(),
                     FilterMode::None => String::new(),
+                    // [v0.11.0] AND 链仅 GUI 产生，TUI 兜底回显空串
+                    FilterMode::All(_) => String::new(),
                 };
                 let cursor = text.chars().count(); // 字符数光标（多字节安全）
                 st.filter_state = FilterState::Typing {

@@ -122,25 +122,57 @@ impl ActiveSession {
             }
             let mut file = res.unwrap();
             use std::io::{Read, Seek, SeekFrom};
-            // 回放末尾 64KB（tail 行数近似；不足处按整行计）
+            // 回放末尾 tail 行：从文件尾按 256KB 分块向前扫换行数（凑 tail+1 个——
+            // 尾行终止符本身也算一行），凑够 / 到文件头 / 触上限为止。窗口随 tail 走，
+            // 行数设置才真正生效（旧版固定 64KB，tail 超过 64KB 均行长时回放行数恒定）。
+            const SCAN_CHUNK: u64 = 256 * 1024;
+            const SCAN_MAX: u64 = 64 * 1024 * 1024; // 回放上限：防巨型单行文件读爆内存
             let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-            let start_pos = len.saturating_sub(64 * 1024);
-            let mut head = String::new();
-            if start_pos > 0 {
-                // 跳过被截断的半行
-                let _ = file.seek(SeekFrom::Start(start_pos));
-                let mut probe = vec![0u8; 512];
-                const NL_BYTE: u8 = 10;
-                let n = file.read(&mut probe).unwrap_or(0);
-                if let Some(pos) = probe[..n].iter().position(|&b| b == NL_BYTE) {
-                    let _ = file.seek(SeekFrom::Start(start_pos + pos as u64 + 1));
-                    head.push_str(&String::from_utf8_lossy(&probe[pos + 1..n]));
+            let want_nl = tail.max(1) as u64 + 1;
+            let mut scanned = 0u64;
+            let mut nl = 0u64;
+            let mut start_pos = 0u64;
+            while scanned < len && scanned < SCAN_MAX {
+                let back = SCAN_CHUNK.min(len - scanned).min(SCAN_MAX - scanned);
+                let cs = len - scanned - back;
+                let _ = file.seek(SeekFrom::Start(cs));
+                let mut c = vec![0u8; back as usize];
+                let n = file.read(&mut c).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                nl += c[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+                scanned += n as u64;
+                start_pos = cs;
+                if nl >= want_nl {
+                    break;
                 }
             }
-            let mut rest = Vec::new();
-            let _ = file.read_to_end(&mut rest);
-            head.push_str(&String::from_utf8_lossy(&rest));
-            let mut lines = lb.push(head.as_bytes());
+            // 窗口 [start_pos, len)：起点未必对齐行首——整块整块读到第一个 \n 为止
+            // 丢弃半行（旧版只探 512 字节，超长首行会被整段吞掉）；攒齐后整窗一次
+            // lossy 转码（分块转会在多字节字符边界产生 U+FFFD）
+            let mut raw = Vec::new();
+            let _ = file.seek(SeekFrom::Start(start_pos));
+            let mut chunk = vec![0u8; 64 * 1024];
+            let mut skip_partial = start_pos > 0;
+            loop {
+                let n = file.read(&mut chunk).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                let mut slice = &chunk[..n];
+                if skip_partial {
+                    match slice.iter().position(|&b| b == b'\n') {
+                        Some(p) => {
+                            slice = &slice[p + 1..];
+                            skip_partial = false;
+                        }
+                        None => continue, // 整块仍在半行内（超长行），继续丢
+                    }
+                }
+                raw.extend_from_slice(slice);
+            }
+            let mut lines = lb.push(&raw);
             let skip = lines.len().saturating_sub(tail);
             let batch: Vec<String> = lines.drain(..).skip(skip).collect();
             if !batch.is_empty() {

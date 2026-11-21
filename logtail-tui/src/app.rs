@@ -757,6 +757,8 @@ async fn toggle_prefilter(st: &mut AppState) {
                 logtail_core::log::FilterMode::Text(t) => t.clone(),
                 logtail_core::log::FilterMode::Regex(_, t) => t.clone(),
                 logtail_core::log::FilterMode::None => String::new(),
+                // [v0.11.0] AND 链仅 GUI 收藏过滤产生，TUI 兜底视作无过滤
+                logtail_core::log::FilterMode::All(_) => String::new(),
             };
             if pat.is_empty() {
                 st.status_msg = "先本地过滤（/ 输入回车）再按 P 推送到远端".into();

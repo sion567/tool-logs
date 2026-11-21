@@ -133,6 +133,42 @@ pub fn export_session(
     Ok(path)
 }
 
+/// [v0.11.0] 过滤结果导出（GUI「导出」按钮）：只导出 view 里的行号（与界面显示
+/// 一致——过滤/级别生效时导出的就是看得见的那些行），行号乱序/越界/淘汰行自动跳过。
+pub fn export_session_view(
+    buf: &LogBuffer,
+    nos: &[u64],
+    sid: &str,
+    dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::fmt::Write as _;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("logtail-{sid}-{stamp}.log"));
+    // 正文先行：头部行数按实际导出数算（view 里的淘汰行跳过不计）
+    let mut body = String::new();
+    let mut n = 0usize;
+    for no in nos {
+        if let Some(l) = buf.by_line_no(*no) {
+            let ts = l
+                .timestamp
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| "-".into());
+            let _ = writeln!(body, "{} {:>5} {}", ts, l.level.label().trim(), l.raw);
+            n += 1;
+        }
+    }
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# logtail 过滤导出 源={sid} 行数={} 时间={}",
+        n,
+        chrono::Local::now().to_rfc3339()
+    );
+    out.push_str(&body);
+    std::fs::write(&path, out)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +255,24 @@ mod tests {
         // 窗口现剩 l2..l5（no=2..5），no=4 上下文 ±2 → l2,l3,l4,l5
         let got: Vec<&str> = b.context(4, 2, 2).iter().map(|l| l.raw.as_str()).collect();
         assert_eq!(got, vec!["l2", "l3", "l4", "l5"]);
+    }
+
+    #[test]
+    fn export_session_view_淘汰行跳过_头部行数正确() {
+        let mut b = LogBuffer::new(3);
+        for s in ["l0", "l1", "l2", "l3"] {
+            b.push(LogLine {
+                raw: s.into(),
+                ..Default::default()
+            });
+        }
+        // 窗口剩 l1..l3（no=1..3）；view 引用已淘汰的 no=0 → 跳过，行数按命中算
+        let dir = std::env::temp_dir().join(format!("logtail-expv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = export_session_view(&b, &[0, 1, 3], "src", &dir).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(text.contains("行数=2"), "淘汰行不计入头部行数: {text}");
+        assert!(text.contains("l1") && text.contains("l3") && !text.contains(" l0\n"));
     }
 }

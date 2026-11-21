@@ -14,6 +14,22 @@ pub enum FilterMode {
     Text(String),
     /// (编译好的, 原始串供编辑回显)
     Regex(Arc<regex::Regex>, String),
+    /// [v0.11.0] AND 链（GUI 收藏过滤叠加）：链内全部命中才算命中。
+    /// 空链不产生——构造方负责单元素退化直传，至少两元素才包 All。
+    All(Vec<FilterMode>),
+}
+
+impl FilterMode {
+    /// [v0.11.0] AND 组合：非 None 的模式串成链，单元素退化为该模式本身。
+    /// 全空 → None（不过滤）
+    pub fn all(modes: Vec<FilterMode>) -> FilterMode {
+        let mut list: Vec<FilterMode> = modes.into_iter().filter(|m| *m != FilterMode::None).collect();
+        match list.len() {
+            0 => FilterMode::None,
+            1 => list.pop().unwrap(),
+            _ => FilterMode::All(list),
+        }
+    }
 }
 
 impl PartialEq for FilterMode {
@@ -22,6 +38,7 @@ impl PartialEq for FilterMode {
             (FilterMode::None, FilterMode::None) => true,
             (FilterMode::Text(a), FilterMode::Text(b)) => a == b,
             (FilterMode::Regex(_, a), FilterMode::Regex(_, b)) => a == b,
+            (FilterMode::All(a), FilterMode::All(b)) => a == b,
             _ => false,
         }
     }
@@ -87,6 +104,8 @@ pub fn matches_filter(line: &LogLine, fm: &FilterMode) -> bool {
         // [v0.10] 文本模式 '|' 分隔多关键词：任一命中即匹配（与正则 | 语义对齐）
         FilterMode::Text(t) => text_patterns(t).iter().any(|p| line.raw.contains(p)),
         FilterMode::Regex(re, _) => re.is_match(&line.raw),
+        // [v0.11.0] AND 链：全部命中才算命中
+        FilterMode::All(list) => list.iter().all(|f| matches_filter(line, f)),
     }
 }
 
@@ -115,10 +134,40 @@ pub fn rebuild_view(buffer: &crate::log::LogBuffer, fm: &FilterMode, lf: LevelFi
                     FilterMode::None => true,
                     FilterMode::Text(_) => patterns.iter().any(|p| l.raw.contains(p)),
                     FilterMode::Regex(re, _) => re.is_match(&l.raw),
+                    // [v0.11.0] AND 链无 Text 快路径，退回逐条 matches_filter
+                    FilterMode::All(_) => matches_filter(l, fm),
                 }
         })
         .map(|l| l.line_no)
         .collect()
+}
+
+/// [v0.11.0] 命中行 ±ctx 行上下文视图：命中（fm ∧ level）的区间合并后展开为升序
+/// line_no 列表；**上下文行不受过滤/级别约束**——Java 堆栈行通常无时间戳/不含
+/// 关键词，跟着命中行走是本功能的全部意义。返回 (展开视图, 命中列表)，
+/// ctx=0 时视图 = 命中列表（等价 rebuild_view）。
+pub fn rebuild_view_ctx(
+    buffer: &crate::log::LogBuffer,
+    fm: &FilterMode,
+    lf: LevelFilter,
+    ctx: usize,
+) -> (Vec<u64>, Vec<u64>) {
+    let hits = rebuild_view(buffer, fm, lf);
+    if ctx == 0 {
+        return (hits.clone(), hits);
+    }
+    // 展开区间 [h-ctx, h+ctx] ∩ 缓冲窗口；相邻/重叠区间借 view.last() 去重，
+    // start > e 的空 RangeInclusive 自然跳过（区间被前一个完全覆盖）
+    let lo = buffer.front_no();
+    let hi = lo + (buffer.len() as u64).saturating_sub(1);
+    let mut view: Vec<u64> = Vec::new();
+    for &h in &hits {
+        let s = h.saturating_sub(ctx as u64).max(lo);
+        let e = (h + ctx as u64).min(hi);
+        let start = view.last().map_or(s, |&last| last.saturating_add(1)).max(s);
+        view.extend(start..=e);
+    }
+    (view, hits)
 }
 
 /// [v0.7.3] 过滤层按键路由：按状态精确声明"过滤层要消费哪些键"，**其余全部透传正常层**。
@@ -182,6 +231,81 @@ mod tests {
         assert_eq!(hits, vec![0, 1, 2]);
         let hits2 = rebuild_view(&b, &FilterMode::Text("ERROR".into()), LevelFilter::All);
         assert_eq!(hits2, vec![1]);
+    }
+
+    #[test]
+    fn all_and链_全命中才算命中() {
+        let l = line(LogLevel::Error, "NullPointer at traceId=abc");
+        // 两条件都命中 → 命中
+        let both = FilterMode::all(vec![
+            FilterMode::Text("NullPointer".into()),
+            FilterMode::Text("traceId".into()),
+        ]);
+        assert!(matches!(both, FilterMode::All(_)), "两元素必须包 All");
+        assert!(matches_filter(&l, &both));
+        // 单条件退化直传，不包 All
+        let single = FilterMode::all(vec![FilterMode::Text("NullPointer".into())]);
+        assert!(matches!(single, FilterMode::Text(_)));
+        // 只命中其一 → 不命中
+        let other = FilterMode::all(vec![
+            FilterMode::Text("NullPointer".into()),
+            FilterMode::Text("timeout".into()),
+        ]);
+        assert!(!matches_filter(&l, &other));
+        // None 混入即剔除；全 None → 无过滤
+        let none_mix = FilterMode::all(vec![FilterMode::None, FilterMode::Text("traceId".into())]);
+        assert!(matches!(none_mix, FilterMode::Text(_)));
+        assert!(matches_filter(&l, &none_mix));
+        assert_eq!(FilterMode::all(vec![FilterMode::None]), FilterMode::None);
+        // rebuild_view 走 All 分支
+        let mut b = LogBuffer::new(10);
+        b.push(line(LogLevel::Error, "NullPointer traceId=abc"));
+        b.push(line(LogLevel::Error, "timeout traceId=xyz"));
+        let got = rebuild_view(&b, &both, LevelFilter::All);
+        assert_eq!(got, vec![0]);
+    }
+
+    #[test]
+    fn rebuild_view_ctx_命中展开上下文与区间合并() {
+        let mut b = LogBuffer::new(20);
+        // 10 行：只有 no=2（ERROR）和 no=7（ERROR）命中
+        for i in 0..10 {
+            let raw = if i == 2 || i == 7 {
+                format!("ERROR hit{i}")
+            } else {
+                format!("at stack line {i}")
+            };
+            let lvl = if i == 2 || i == 7 {
+                LogLevel::Error
+            } else {
+                LogLevel::Unknown
+            };
+            b.push(line(lvl, &raw));
+        }
+        // ctx=2：[0..4] ∪ [5..9] 相邻合并 → 0..9 连续，且含不命中的堆栈行
+        let (view, hits) = rebuild_view_ctx(&b, &FilterMode::Text("hit".into()), LevelFilter::All, 2);
+        assert_eq!(hits, vec![2, 7]);
+        assert_eq!(view, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        // ctx=1：[1..3] ∪ [6..8] 两段独立
+        let (view, hits) = rebuild_view_ctx(&b, &FilterMode::Text("hit".into()), LevelFilter::All, 1);
+        assert_eq!(hits, vec![2, 7]);
+        assert_eq!(view, vec![1, 2, 3, 6, 7, 8]);
+        // 级别只约束命中：两个 ERROR 都命中，Unknown 堆栈行只以上下文身份可见
+        let (view, hits) = rebuild_view_ctx(&b, &NO_FILTER, LevelFilter::Error, 1);
+        assert_eq!(hits, vec![2, 7]);
+        assert_eq!(view, vec![1, 2, 3, 6, 7, 8]);
+        // 级别把 Unknown 行挡在命中之外（只当上下文，不当命中）
+        let (view, hits) =
+            rebuild_view_ctx(&b, &FilterMode::Text("stack line 4".into()), LevelFilter::Error, 3);
+        assert!(hits.is_empty(), "Unknown 行被级别挡住，不产生命中");
+        assert!(view.is_empty());
+        // ctx=0 等价 rebuild_view
+        let (view, hits) = rebuild_view_ctx(&b, &FilterMode::Text("hit".into()), LevelFilter::All, 0);
+        assert_eq!(hits, vec![2, 7]);
+        assert_eq!(view, hits);
+        // 区间钳到窗口内：命中 no=2、ctx=5 → 前钳到 0，不越界
+        let (view, _) = rebuild_view_ctx(&b, &FilterMode::Text("hit2".into()), LevelFilter::All, 5);
+        assert_eq!(view, vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]

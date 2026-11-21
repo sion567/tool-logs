@@ -306,6 +306,8 @@ fn render_toolbar(frame: &mut Frame, area: ratatui::layout::Rect, st: &AppState)
                 FilterMode::None => "无".to_string(),
                 FilterMode::Text(t) => t.clone(),
                 FilterMode::Regex(_, t) => format!("re:{t}"),
+                // [v0.11.0] AND 链仅 GUI 收藏过滤产生，TUI 兜底显示
+                FilterMode::All(_) => "多条件".to_string(),
             };
             (t, Style::default())
         }
@@ -546,6 +548,8 @@ fn log_row(
 fn split_matches<'a>(text: &'a str, fm: &FilterMode) -> Vec<(&'a str, bool)> {
     match fm {
         FilterMode::None => vec![(text, false)],
+        // [v0.11.0] AND 链仅 GUI 产生，TUI 兜底不做片段高亮
+        FilterMode::All(_) => vec![(text, false)],
         FilterMode::Text(t) => {
             // [v0.10] 多关键词：全部命中区间合并后高亮（重叠取并集）
             let patterns = logtail_core::log::text_patterns(t);

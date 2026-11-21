@@ -5,12 +5,12 @@ pub mod color;
 pub mod filter;
 pub mod parser;
 
-pub use buffer::{export_session, LogBuffer};
+pub use buffer::{export_session, export_session_view, LogBuffer};
 pub use color::colorize;
 // 键盘层的 routes_to_filter / edit_insert / edit_backspace 属 TUI 输入处理，随 TUI 层走
 pub use filter::{
-    active_filter_of, matches_filter, rebuild_view, text_patterns, FilterMode, FilterState,
-    LevelFilter, NO_FILTER,
+    active_filter_of, matches_filter, rebuild_view, rebuild_view_ctx, text_patterns, FilterMode,
+    FilterState, LevelFilter, NO_FILTER,
 };
 pub use parser::{detect_level, parse_line, parse_line_multi};
 use parser::strip_ts_prefix;

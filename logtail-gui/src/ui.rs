@@ -14,12 +14,12 @@ use eframe::egui::{
 };
 
 use logtail_core::config::{Config, SourceConfig};
-use logtail_core::log::export_session;
+use logtail_core::log::{export_session, export_session_view};
 use logtail_core::log::filter::LevelFilter;
-use logtail_core::source::{ModeVariant, Preset, check_pattern, next_earlier_mode};
+use logtail_core::source::{LogSource, ModeVariant, Preset, check_pattern, next_earlier_mode};
 use logtail_core::ssh::StreamEvent;
 
-use crate::prefs::{LastTab, Prefs};
+use crate::prefs::{LastTab, Prefs, SavedFilter};
 use crate::pump::{Pump, PumpCmd};
 use crate::tab::{SessionState, Tab, TabKind, level_color, raw_hits, split_other_idx};
 
@@ -67,6 +67,11 @@ pub struct LogTailApp {
     pub(crate) remote_cfg_err: Option<String>,
     /// 连接源对话框开关
     show_connect: bool,
+    /// [v0.11.0] 外部查看器命令模板设置窗口开关
+    show_viewer_cfg: bool,
+    /// [v0.11.0] 合并时间线选源窗口开关 + 已勾选源名
+    show_merge: bool,
+    merge_pick: Vec<String>,
     /// 每帧落盘去抖
     prefs_dirty: bool,
     /// [v0.2.4] 服务器/源/预设管理窗口（manage.rs）
@@ -88,6 +93,9 @@ impl LogTailApp {
             remote_cfg: None,
             remote_cfg_err: None,
             show_connect: false,
+            show_viewer_cfg: false,
+            show_merge: false,
+            merge_pick: Vec::new(),
             prefs_dirty: false,
             manage: crate::manage::ManageState::default(),
         }
@@ -100,7 +108,14 @@ impl LogTailApp {
         while let Ok((id, ev)) = self.pump.ev_rx.try_recv() {
             match ev {
                 StreamEvent::Lines(lines) => {
-                    if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    // [v0.11.0] 合并 tab：事件按成员 part id 路由，行 source/解析按成员源；
+                    // 普通 tab 仍按 t.id
+                    let route = self
+                        .tabs
+                        .iter()
+                        .position(|t| t.id == id || t.parts.iter().any(|p| p.id == id));
+                    if let Some(ti) = route {
+                        let t = &mut self.tabs[ti];
                         // [v0.2.0] docker 权限拒绝自动提示修复命令（与 TUI drain_session 同文案）
                         if let TabKind::Remote(r) = &t.kind {
                             for l in &lines {
@@ -113,7 +128,19 @@ impl LogTailApp {
                                 }
                             }
                         }
-                        let n = t.ingest(lines);
+                        // 首行到达 → 流式中（既有语义：Connecting 只在发命令前成立）
+                        if t.state == SessionState::Connecting {
+                            t.state = SessionState::Streaming;
+                        }
+                        let n = match t.parts.iter().find(|p| p.id == id) {
+                            Some(p) => {
+                                let src: std::sync::Arc<str> =
+                                    std::sync::Arc::from(p.name.as_str());
+                                let st = p.src_type;
+                                t.ingest_with(lines, st, &src)
+                            }
+                            None => t.ingest(lines),
+                        };
                         // [v0.10.8] 倒序暂停钉窗：暂停期间新行从顶部涌入，把正在看的
                         // 内容往下推——累积行数，渲染层按 row_h 补偿视口后清零
                         if self.prefs.reverse && !t.follow {
@@ -123,7 +150,26 @@ impl LogTailApp {
                     }
                 }
                 StreamEvent::Ended => {
-                    if let Some(t) = self.tabs.iter_mut().find(|t| t.id == id) {
+                    let route = self
+                        .tabs
+                        .iter()
+                        .position(|t| t.id == id || t.parts.iter().any(|p| p.id == id));
+                    if let Some(ti) = route {
+                        let t = &mut self.tabs[ti];
+                        // [v0.11.0] 合并 tab：成员会话收尾不改变整体状态——
+                        // 全部成员结束才 Ended；单个成员的失败行已在缓冲里可见
+                        if let Some(pi) = t.parts.iter().position(|p| p.id == id) {
+                            t.parts[pi].ended = true;
+                            let name = t.parts[pi].name.clone();
+                            if t.parts.iter().all(|p| p.ended) {
+                                t.state = SessionState::Ended;
+                                t.user_set_follow(false);
+                                self.status = format!("{}：全部成员源已结束", t.title);
+                            } else {
+                                self.status = format!("合并源「{name}」已结束（其余源继续）");
+                            }
+                            continue;
+                        }
                         // 连接失败的收尾：错误行已入缓冲，据此判 Failed 而非 Ended
                         let fail_msg = t
                             .buffer
@@ -166,8 +212,9 @@ impl LogTailApp {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.tabs
-            .push(Tab::new_local(id, &path, self.prefs.max_lines));
+        let mut t = Tab::new_local(id, &path, self.prefs.max_lines);
+        t.ctx = self.prefs.filter_ctx; // [v0.11.0] 上下文 ±N 默认值
+        self.tabs.push(t);
         self.active = self.tabs.len() - 1;
         let _ = self.pump.cmd_tx.send(PumpCmd::OpenLocal {
             id,
@@ -182,6 +229,10 @@ impl LogTailApp {
     fn close_tab(&mut self, idx: usize) {
         let Some(t) = self.tabs.get(idx) else { return };
         let _ = self.pump.cmd_tx.send(PumpCmd::Stop { id: t.id });
+        // [v0.11.0] 合并 tab：全部成员会话一并停（Stop 未注册的 id 无害）
+        for p in &t.parts {
+            let _ = self.pump.cmd_tx.send(PumpCmd::Stop { id: p.id });
+        }
         self.tabs.remove(idx);
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len().saturating_sub(1);
@@ -220,6 +271,7 @@ impl LogTailApp {
         let id = self.next_id;
         self.next_id += 1;
         let mut t = Tab::new_remote(id, sc, srv, self.prefs.max_lines);
+        t.ctx = self.prefs.filter_ctx; // [v0.11.0] 上下文 ±N 默认值
         t.state = SessionState::Connecting;
         self.tabs.push(t);
         self.active = self.tabs.len() - 1;
@@ -376,6 +428,42 @@ impl LogTailApp {
         }
     }
 
+    /// [v0.11.0] 把当前 tab 的过滤词存为收藏按钮（chip 标签截短，全词看悬停提示）
+    fn save_current_filter(&mut self) {
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        let pattern = self.tabs[ti].filter_input.trim().to_string();
+        if pattern.is_empty() {
+            return;
+        }
+        let regex_on = self.tabs[ti].regex_on;
+        if self
+            .prefs
+            .saved_filters
+            .iter()
+            .any(|sf| sf.pattern == pattern && sf.regex_on == regex_on)
+        {
+            self.status = format!("收藏已存在「{pattern}」");
+            return;
+        }
+        let name: String = {
+            let n = pattern.chars().count();
+            let mut c: Vec<char> = pattern.chars().take(16).collect();
+            if n > 16 {
+                c.push('…');
+            }
+            c.into_iter().collect()
+        };
+        self.prefs.saved_filters.push(SavedFilter {
+            name,
+            pattern,
+            regex_on,
+        });
+        self.prefs_dirty = true;
+        self.status = "已存为收藏过滤按钮（右键 chip 删除；与过滤框 AND 叠加）".into();
+    }
+
     fn export_active(&mut self) {
         let Some(ti) = self.active_tab_idx() else {
             return;
@@ -386,10 +474,225 @@ impl LogTailApp {
         else {
             return;
         };
+        // [v0.11.0] 过滤词/收藏链/级别任一生效时导出当前视图（所见即所导）；
+        // 无过滤导出全缓冲
+        let dedupe = self.prefs.dedupe;
+        let (nos, filtered) = {
+            let t = &mut self.tabs[ti];
+            t.ensure_view(dedupe, self.prefs.fold_hits);
+            let filtered = t.active_filter().is_some() || t.level != LevelFilter::All;
+            (t.view.clone(), filtered)
+        };
         let t = &self.tabs[ti];
-        match export_session(&t.buffer, &t.path_for_export(), &dir) {
+        let res = if filtered {
+            export_session_view(&t.buffer, &nos, &t.path_for_export(), &dir)
+        } else {
+            export_session(&t.buffer, &t.path_for_export(), &dir)
+        };
+        match res {
+            Ok(p) if filtered => {
+                self.status = format!("已导出过滤结果 {} 行 → {}", nos.len(), p.display())
+            }
             Ok(p) => self.status = format!("已导出 {}", p.display()),
             Err(e) => self.status = format!("导出失败: {e:#}"),
+        }
+    }
+
+    /// [v0.11.0] 外部查看器打开当前视图：视图（过滤/上下文生效时含上下文行，
+    /// 与导出同一套所见即所导语义）写临时文件，按模板经系统 shell spawn（不等待）。
+    fn open_external_viewer(&mut self) {
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        let cmd = self.prefs.viewer_cmd.trim().to_string();
+        if cmd.is_empty() {
+            self.status = "先在 查看 → 外部查看器命令 配置模板，如 lnav {file}".into();
+            return;
+        }
+        if !cmd.contains("{file}") {
+            self.status = "模板需含 {file} 占位符（临时文件路径的替换点）".into();
+            return;
+        }
+        let dedupe = self.prefs.dedupe;
+        let fold_hits = self.prefs.fold_hits;
+        let (nos, filtered) = {
+            let t = &mut self.tabs[ti];
+            t.ensure_view(dedupe, fold_hits);
+            let filtered = t.active_filter().is_some() || t.level != LevelFilter::All;
+            (t.view.clone(), filtered)
+        };
+        let t = &self.tabs[ti];
+        let dir = std::env::temp_dir();
+        let res = if filtered {
+            export_session_view(&t.buffer, &nos, &t.path_for_export(), &dir)
+        } else {
+            export_session(&t.buffer, &t.path_for_export(), &dir)
+        };
+        match res {
+            Ok(path) => {
+                let sh = cmd.replace("{file}", &path.display().to_string());
+                let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+                    ("cmd", vec!["/C".into(), sh])
+                } else {
+                    ("sh", vec!["-c".into(), sh])
+                };
+                match std::process::Command::new(program).args(&args).spawn() {
+                    Ok(_) => {
+                        let n = if filtered { nos.len() } else { t.buffer.len() };
+                        self.status = format!("已用外部查看器打开（{n} 行）: {cmd}");
+                    }
+                    Err(e) => self.status = format!("外部查看器启动失败（{cmd}）: {e}"),
+                }
+            }
+            Err(e) => self.status = format!("临时文件写出失败: {e:#}"),
+        }
+    }
+
+    /// [v0.11.0] 合并时间线 tab：每个源独立泵会话（各自 tail 回放 + follow），
+    /// 事件按成员 part id 路由进同一缓冲；视图按时间戳排序（见 Tab::sort_view_by_time）。
+    /// 远程源 v1 固定全量模式、不做远筛推送。
+    fn open_merged(&mut self, names: &[String]) {
+        self.ensure_remote_cfg();
+        let Some(cfg) = self.remote_cfg.clone() else {
+            self.status = "config.toml 加载失败，无法打开合并时间线".into();
+            return;
+        };
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut parts: Vec<crate::tab::MergedPart> = Vec::new();
+        let mut cmds: Vec<PumpCmd> = Vec::new();
+        for name in names {
+            let Some(sc) = cfg.sources.iter().find(|s| &s.name == name) else {
+                self.status = format!("源 {name} 不在 config.toml 里，已跳过");
+                continue;
+            };
+            let pid = self.next_id;
+            self.next_id += 1;
+            let src_type = sc.source.source_type();
+            match &sc.source {
+                LogSource::LocalFile { path, .. } => {
+                    cmds.push(PumpCmd::OpenLocal {
+                        id: pid,
+                        path: path.clone(),
+                        tail: self.prefs.max_lines,
+                    });
+                }
+                _ => {
+                    let Some(srv) = cfg.servers.iter().find(|s| s.name == sc.server) else {
+                        self.status = format!(
+                            "源 {name} 引用的服务器 \"{}\" 不存在，已跳过",
+                            sc.server
+                        );
+                        self.next_id -= 1; // 回收未用 id
+                        continue;
+                    };
+                    cmds.push(PumpCmd::ConnectRemote(Box::new(crate::pump::RemoteConnect {
+                        id: pid,
+                        server: srv.clone(),
+                        source: sc.source.clone(),
+                        mode: ModeVariant::Full,
+                        prefilter: None,
+                    })));
+                }
+            }
+            parts.push(crate::tab::MergedPart {
+                id: pid,
+                name: sc.name.clone(),
+                src_type,
+                ended: false,
+            });
+        }
+        if parts.is_empty() {
+            self.status = "没有可合并的源（先在 config.toml 里配置）".into();
+            return;
+        }
+        let n_parts = parts.len();
+        let mut t = Tab::new_merged(id, parts, self.prefs.max_lines);
+        t.state = SessionState::Connecting;
+        self.tabs.push(t);
+        self.active = self.tabs.len() - 1;
+        for c in cmds {
+            let _ = self.pump.cmd_tx.send(c);
+        }
+        self.status = format!("合并时间线：{n_parts} 个源连接中…");
+    }
+
+    /// [v0.11.0] 合并时间线选源窗口（打开动作移出闭包——open_merged 需要 &mut self）
+    fn merge_dialog(&mut self, ctx: &Context) {
+        if !self.show_merge {
+            return;
+        }
+        let Some(cfg) = self.remote_cfg.clone() else {
+            self.show_merge = false;
+            return;
+        };
+        let mut do_open = false;
+        egui::Window::new("合并时间线（多源）")
+            .open(&mut self.show_merge)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("勾选要合并进同一条时间线的源；每行带源名标签，按时间戳排序显示。")
+                        .weak(),
+                );
+                ui.separator();
+                for sc in &cfg.sources {
+                    let mut on = self.merge_pick.contains(&sc.name);
+                    if ui.checkbox(&mut on, &sc.name).changed() {
+                        if on {
+                            self.merge_pick.push(sc.name.clone());
+                        } else {
+                            self.merge_pick.retain(|n| n != &sc.name);
+                        }
+                    }
+                }
+                ui.separator();
+                let picked = self.merge_pick.clone();
+                if ui
+                    .add_enabled(!picked.is_empty(), egui::Button::new("打开合并 tab"))
+                    .clicked()
+                {
+                    do_open = true;
+                }
+            });
+        if do_open {
+            let picked = self.merge_pick.clone();
+            self.open_merged(&picked);
+            self.show_merge = false;
+        }
+        if !self.show_merge {
+            self.merge_pick.clear();
+        }
+    }
+
+    /// [v0.11.0] 外部查看器命令模板设置窗口
+    fn viewer_cfg_dialog(&mut self, ctx: &Context) {
+        if !self.show_viewer_cfg {
+            return;
+        }
+        let mut open = self.show_viewer_cfg;
+        egui::Window::new("外部查看器命令")
+            .open(&mut open)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("把当前视图写成临时文件后执行（{file} = 临时 .log 路径）：").weak());
+                if ui
+                    .add(
+                        TextEdit::singleline(&mut self.prefs.viewer_cmd)
+                            .hint_text("如 lnav {file}、multitail {file}、code -r {file}"),
+                    )
+                    .changed()
+                {
+                    self.prefs_dirty = true;
+                }
+                ui.separator();
+                ui.label("· 经系统 shell 执行：Windows cmd /C，类 Unix sh -c");
+                ui.label("· 命令需自行安装（lnav / multitail）；留空 = 不启用");
+                ui.label("· 视图即时快照：外部查看器里不会自动刷新新行");
+            });
+        self.show_viewer_cfg = open;
+        if !open {
+            self.prefs_dirty = true;
         }
     }
 
@@ -459,6 +762,17 @@ impl LogTailApp {
     }
 
     // ---------- 输入 ----------
+
+    /// [v0.11.0] 跳上/下一条命中（⏮⏭按钮与 e/w 键共用）
+    fn jump_hit(&mut self, forward: bool) {
+        let Some(ti) = self.active_tab_idx() else {
+            return;
+        };
+        match self.tabs[ti].jump_hit(forward) {
+            Some(no) => self.status = format!("已跳到命中行 {no}（跟随已暂停，点「↓ 末尾」恢复）"),
+            None => self.status = "无命中行可跳（先过滤出命中）".into(),
+        }
+    }
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
         if ctx.egui_wants_keyboard_input() {
@@ -539,6 +853,14 @@ impl LogTailApp {
             }
         }
 
+        // [v0.11.0] e/w：跳下/上一条命中（lnav 心智；输入框聚焦时不触发——
+        // handle_shortcuts 开头已守护 egui_wants_keyboard_input）
+        let next_hit = ctx.input(|i| i.key_pressed(Key::E));
+        let prev_hit = ctx.input(|i| i.key_pressed(Key::W));
+        if next_hit || prev_hit {
+            self.jump_hit(next_hit);
+        }
+
         // [v0.2.0] ←→ 长行横滚（半屏步进，同 TUI）；Home 复位到行首
         let left = ctx.input(|i| i.key_pressed(Key::ArrowLeft));
         let right = ctx.input(|i| i.key_pressed(Key::ArrowRight));
@@ -606,14 +928,16 @@ impl eframe::App for LogTailApp {
 
         self.pump_events(ctx);
 
-        // [v0.2.0] 激活 tab 变化 → 记入偏好（随去抖落盘，下次启动恢复）
-        let want = self.active_tab_idx().map(|ti| {
+        // [v0.2.0] 激活 tab 变化 → 记入偏好（随去抖落盘，下次启动恢复）；
+        // [v0.11.0] 合并 tab 不记忆（成员可变，恢复语义不明确）
+        let want = self.active_tab_idx().and_then(|ti| {
             let t = &self.tabs[ti];
             match &t.kind {
-                TabKind::Local { path } => LastTab::Local { path: path.clone() },
-                TabKind::Remote(r) => LastTab::Remote {
+                TabKind::Local { path } => Some(LastTab::Local { path: path.clone() }),
+                TabKind::Remote(r) => Some(LastTab::Remote {
                     source: r.source_name.clone(),
-                },
+                }),
+                TabKind::Merged { .. } => None,
             }
         });
         if self.prefs.last_tab != want {
@@ -647,6 +971,8 @@ impl eframe::App for LogTailApp {
         self.log_area(ui);
         self.status_bar(ui);
         self.connect_dialog(&ctx);
+        self.viewer_cfg_dialog(&ctx);
+        self.merge_dialog(&ctx);
         self.manage_window(&ctx);
         self.handle_dnd(&ctx);
         self.handle_shortcuts(&ctx);
@@ -668,6 +994,16 @@ impl LogTailApp {
                     if ui.button("⛓ 连接源…").clicked() {
                         self.ensure_remote_cfg();
                         self.show_connect = true;
+                        ui.close();
+                    }
+                    // [v0.11.0] 合并时间线：多源入同一缓冲按时间排序（barklog 心智）
+                    if ui
+                        .button("⧉ 合并时间线（多源）…")
+                        .on_hover_text("勾选 config.toml 里的多个源合成一条时间线；每行带源名标签")
+                        .clicked()
+                    {
+                        self.ensure_remote_cfg();
+                        self.show_merge = true;
                         ui.close();
                     }
                     ui.separator();
@@ -762,6 +1098,33 @@ impl LogTailApp {
                         self.prefs.show_sparkline = spark;
                         self.prefs_dirty = true;
                     }
+                    // [v0.11.0] 多行堆栈跟随：无时间戳行缩进灰显（归属上方最近时间戳行）
+                    let mut sf = self.prefs.stack_follow;
+                    if ui
+                        .checkbox(&mut sf, "堆栈跟随（无时间戳行灰显缩进）")
+                        .on_hover_text(
+                            "开 = 无时间戳的行（Java 堆栈的 at ...）缩进灰显，\n视觉归属上方最近的时间戳行；纯渲染层，不影响过滤/复制/导出",
+                        )
+                        .changed()
+                    {
+                        self.prefs.stack_follow = sf;
+                        self.prefs_dirty = true;
+                    }
+                    ui.separator();
+                    // [v0.11.0] 外部查看器逃生舱：当前视图写临时文件后按模板 spawn
+                    if ui
+                        .button("用外部查看器打开当前视图（lnav / multitail…）")
+                        .on_hover_text("过滤/上下文生效时导出的就是显示中的行；命令模板在下一项配置")
+                        .clicked()
+                    {
+                        self.open_external_viewer();
+                        ui.close();
+                    }
+                    if ui.button("外部查看器命令…").clicked() {
+                        self.show_viewer_cfg = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     let mut aot = self.prefs.always_on_top;
                     if ui.checkbox(&mut aot, "窗口置顶").changed() {
                         self.prefs.always_on_top = aot;
@@ -860,6 +1223,10 @@ impl LogTailApp {
                             "{}@{}:{} · {}",
                             r.server.user, r.server.host, r.server.port, r.source_name
                         ),
+                        // [v0.11.0] 合并 tab：全名 + 成员数
+                        TabKind::Merged { names } => {
+                            format!("合并时间线 {} 个源：{}", names.len(), names.join(" + "))
+                        }
                     };
                     let is_active = i == self.active;
                     let (click_tab, click_close) =
@@ -895,6 +1262,10 @@ impl LogTailApp {
                             "{}@{}:{} · {}",
                             r.server.user, r.server.host, r.server.port, r.source_name
                         ),
+                        // [v0.11.0] 合并 tab：全部成员源名
+                        TabKind::Merged { names } => {
+                            format!("合并时间线：{}", names.join(" + "))
+                        }
                     }
                 };
                 ui.separator();
@@ -923,7 +1294,7 @@ impl LogTailApp {
                 }
                 ui.separator();
 
-                // 过滤（随输入实时生效）
+                // 过滤（随输入实时生效；回车记录历史，▼ 下拉回填最近 10 条）
                 let resp = ui.add(
                     TextEdit::singleline(&mut self.tabs[ti].filter_input)
                         .desired_width(280.0)
@@ -931,6 +1302,30 @@ impl LogTailApp {
                 );
                 if resp.changed() {
                     self.tabs[ti].clear_selection();
+                }
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    self.prefs
+                        .push_filter_history(&self.tabs[ti].filter_input.clone());
+                    self.prefs_dirty = true;
+                }
+                if !self.prefs.filter_history.is_empty() {
+                    ui.menu_button("▼", |ui| {
+                        ui.set_min_width(220.0);
+                        ui.label(RichText::new("过滤历史（回车记录）").weak());
+                        let history = self.prefs.filter_history.clone();
+                        for h in &history {
+                            if ui.selectable_label(false, h).clicked() {
+                                self.tabs[ti].filter_input = h.clone();
+                                self.tabs[ti].clear_selection();
+                                ui.close();
+                            }
+                        }
+                        if ui.small_button("清空历史").clicked() {
+                            self.prefs.filter_history.clear();
+                            self.prefs_dirty = true;
+                            ui.close();
+                        }
+                    });
                 }
                 if ui.checkbox(&mut self.tabs[ti].regex_on, "正则").changed() {
                     self.tabs[ti].clear_selection();
@@ -941,6 +1336,120 @@ impl LogTailApp {
                 }
                 if let Some(err) = &self.tabs[ti].regex_error {
                     ui.colored_label(ERR_FG, format!("正则无效: {err}"));
+                }
+
+                // [v0.11.0] 收藏过滤 chips：点击开/关（与过滤框 AND 叠加，可多选），
+                // 右键删除；「★存」把当前过滤词存为按钮（gui.toml 持久化，预置 3 条种子）
+                if !self.prefs.saved_filters.is_empty()
+                    || !self.tabs[ti].filter_input.is_empty()
+                {
+                    let saved = self.prefs.saved_filters.clone();
+                    let mut toggled: Option<(String, bool)> = None;
+                    let mut removed: Option<String> = None;
+                    for sf in &saved {
+                        let on = self.tabs[ti].pinned_on(&sf.pattern);
+                        let btn = egui::Button::new(RichText::new(&sf.name).strong())
+                            .small()
+                            .fill(if on { HIT_BG } else { LOG_BG });
+                        let r = ui.add(btn).on_hover_text(format!(
+                            "{}\n点击开/关（与过滤框 AND 叠加）· 右键删除",
+                            sf.pattern
+                        ));
+                        if r.clicked() {
+                            toggled = Some((sf.pattern.clone(), sf.regex_on));
+                        }
+                        if r.secondary_clicked() {
+                            removed = Some(sf.pattern.clone());
+                        }
+                    }
+                    if !self.tabs[ti].filter_input.is_empty()
+                        && ui
+                            .small_button("★存")
+                            .on_hover_text("把当前过滤词存为收藏按钮（gui.toml 持久化）")
+                            .clicked()
+                    {
+                        self.save_current_filter();
+                    }
+                    if let Some((p, re)) = toggled {
+                        match self.tabs[ti].toggle_pinned(&p, re) {
+                            Ok(true) => self.status = format!("收藏过滤「{p}」开启（AND 叠加）"),
+                            Ok(false) => self.status = format!("收藏过滤「{p}」关闭"),
+                            Err(e) => self.status = format!("收藏过滤无效: {e}"),
+                        }
+                    }
+                    if let Some(p) = removed {
+                        self.prefs.saved_filters.retain(|sf| sf.pattern != p);
+                        self.tabs[ti].pinned.retain(|(pat, _)| *pat != p);
+                        self.prefs_dirty = true;
+                        self.status = format!("已删除收藏过滤「{p}」");
+                    }
+                }
+
+                // [v0.11.0] 上下文 ±N：命中行连前后 N 行一起显示（Java 堆栈不拆散），
+                // 上下文行不受过滤/级别约束（白底，命中行仍黄底）。N 全局记忆（gui.toml），
+                // 按 tab 开关。合并 tab 的上下文应按时间序展开（buffer 序无意义），v1 禁用
+                let merged = matches!(self.tabs[ti].kind, TabKind::Merged { .. });
+                let mut ctx_on = self.tabs[ti].ctx > 0;
+                if ui
+                    .add_enabled(
+                        !merged,
+                        egui::Checkbox::new(&mut ctx_on, "上下文"),
+                    )
+                    .on_hover_text(
+                        "过滤命中行连前后 N 行一起显示（堆栈不拆散）\n上下文行不受过滤/级别约束，白底显示",
+                    )
+                    .on_disabled_hover_text("合并时间线 tab 不支持上下文展开（多源交错无邻接语义）")
+                    .changed()
+                {
+                    self.tabs[ti].ctx = if ctx_on { self.prefs.filter_ctx.max(1) } else { 0 };
+                    self.tabs[ti].clear_selection();
+                }
+                if self.tabs[ti].ctx > 0
+                    && ui
+                        .add(egui::DragValue::new(&mut self.tabs[ti].ctx).range(1..=50))
+                        .on_hover_text("每个命中行带前后 N 行（新 tab 默认值记忆到 gui.toml）")
+                        .changed()
+                {
+                    self.prefs.filter_ctx = self.tabs[ti].ctx;
+                    self.prefs_dirty = true;
+                }
+                // [v0.11.0] 命中块折叠（仅上下文模式）：连续段折成一行 ×N
+                if self.tabs[ti].ctx > 0 {
+                    let mut fold = self.prefs.fold_hits;
+                    if ui
+                        .checkbox(&mut fold, "折叠命中块")
+                        .on_hover_text("把每个命中块（命中行+其上下文）折成一行 ×N，双击代表行看详情")
+                        .changed()
+                    {
+                        self.prefs.fold_hits = fold;
+                        self.prefs_dirty = true;
+                    }
+                }
+                // [v0.11.0] 跳上/下一条命中（同 e/w 键）；复制当前视图全文
+                let has_hits = self.tabs[ti].hit_count > 0;
+                if ui
+                    .add_enabled(has_hits, egui::Button::new("⏮命中").small())
+                    .on_hover_text("跳到上一条命中（w 键）")
+                    .clicked()
+                {
+                    self.jump_hit(false);
+                }
+                if ui
+                    .add_enabled(has_hits, egui::Button::new("⏭命中").small())
+                    .on_hover_text("跳到下一条命中（e 键）")
+                    .clicked()
+                {
+                    self.jump_hit(true);
+                }
+                let has_view = !self.tabs[ti].view.is_empty();
+                if ui
+                    .add_enabled(has_view, egui::Button::new("复制结果").small())
+                    .on_hover_text("复制当前视图全文（含上下文行；大结果建议用导出）")
+                    .clicked()
+                    && let Some(text) = self.tabs[ti].view_text()
+                {
+                    ui.ctx().copy_text(text);
+                    self.status = format!("已复制视图 {} 行", self.tabs[ti].view.len());
                 }
                 ui.separator();
 
@@ -1253,6 +1762,7 @@ impl LogTailApp {
         dedupe: bool,
         user_scroll_y: bool,
     ) {
+        let stack_follow = self.prefs.stack_follow; // [v0.11.0] 堆栈跟随（渲染层开关）
         // 栏头占用的实际高度从内容高里扣掉，否则窗格内容超出分配盒
         // （首帧定位/跳底/滚动条都会随之错位）
         let head_h = if show_header {
@@ -1279,7 +1789,7 @@ impl LogTailApp {
         let content_size = egui::vec2(size.x, (size.y - head_h).max(60.0));
         let (row_h, font_size, follow, jump, prev_inner_h) = {
             let tab = &mut self.tabs[ti];
-            tab.ensure_view(dedupe);
+            tab.ensure_view(dedupe, self.prefs.fold_hits);
             let fs = self.prefs.font_size;
             (fs * 1.5, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
         };
@@ -1376,7 +1886,16 @@ impl LogTailApp {
                         };
                         ui.painter().rect_filled(rect, 0.0, bg);
 
-                        let color = level_color(level);
+                        // [v0.11.0] 堆栈跟随：无时间戳行缩进灰显（视觉归属上方最近
+                        // 时间戳行）。纯渲染层——过滤/复制/导出/选中不受影响；
+                        // 命中行保持黄底与命中色（命中优先于灰显）
+                        let is_cont = stack_follow && ts.is_none();
+                        let color = if is_cont && !hit {
+                            DETAIL_MUTED
+                        } else {
+                            level_color(level)
+                        };
+                        let indent = if is_cont { 24.0 } else { 0.0 };
                         // [v0.2.0] 折叠组行尾 ×N；←→ 横滚整体平移（主视图仍单行裁剪，
                         // 超出由 ScrollArea 裁剪，长行全文看详情条）
                         let text = if group_n > 1 {
@@ -1390,7 +1909,7 @@ impl LogTailApp {
                             color,
                         );
                         ui.painter().galley(
-                            egui::pos2(rect.left() + 3.0 - tab.h_scroll_x, rect.top() + 2.0),
+                            egui::pos2(rect.left() + 3.0 + indent - tab.h_scroll_x, rect.top() + 2.0),
                             galley,
                             color,
                         );
@@ -1495,10 +2014,10 @@ impl LogTailApp {
                     ui.label("就绪");
                     return;
                 };
-                let (title, total, hits, state_label, follow, size_mb, is_local, path, server_name, mode_label, prefilter) = {
+                let (title, total, hits, hit_count, ctx, state_label, follow, size_mb, is_local, path, server_name, mode_label, prefilter) = {
                     let t = &mut self.tabs[ti];
                     let dedupe = self.prefs.dedupe;
-                    t.ensure_view(dedupe);
+                    t.ensure_view(dedupe, self.prefs.fold_hits);
                     let state_label = match t.state {
                         SessionState::Connecting => "连接中",
                         SessionState::Streaming => "流式中",
@@ -1508,6 +2027,10 @@ impl LogTailApp {
                     let (is_local, path, server_name, mode_label, prefilter) = match &t.kind {
                         TabKind::Local { path } => {
                             (true, Some(path.clone()), String::new(), String::new(), None)
+                        }
+                        // [v0.11.0] 合并 tab：无 server/文件元数据，视同本地栏位
+                        TabKind::Merged { .. } => {
+                            (true, None, String::new(), String::new(), None)
                         }
                         TabKind::Remote(r) => (
                             false,
@@ -1521,6 +2044,8 @@ impl LogTailApp {
                         t.title.clone(),
                         t.buffer.len(),
                         t.view.len(),
+                        t.hit_count,
+                        t.ctx,
                         state_label,
                         t.follow,
                         t.file_size,
@@ -1547,8 +2072,14 @@ impl LogTailApp {
                 } else {
                     String::new()
                 };
+                // [v0.11.0] 上下文模式区分「命中」与「显示」（显示含上下文行）
+                let match_part = if ctx > 0 {
+                    format!("命中 {hit_count} · 显示 {hits}/{total}（±{ctx} 行上下文）")
+                } else {
+                    format!("匹配 {hits}/{total}")
+                };
                 ui.label(format!(
-                    "{title_part} · {total} 行 · 匹配 {hits}/{total}{size_part} · {state_label}"
+                    "{title_part} · {total} 行 · {match_part}{size_part} · {state_label}"
                 ));
                 // [v0.2.0] 远程 tab 显示模式与远筛指示（同 TUI 工具栏状态）
                 if !mode_label.is_empty() {

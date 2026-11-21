@@ -197,6 +197,43 @@ l4
     Ok(())
 }
 
+/// 回归：回放窗口必须随 tail 走，而不是固定 64KB——600KB 文件 tail=2500 行
+/// （64KB 只容得下 ~320 行），旧版恒回放末尾 64KB，GUI 行数上限设置形同虚设。
+#[tokio::test]
+async fn 本地流_回放窗口随tail行数走() -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!("logtail-tailwin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("big.log");
+    // 3000 行 × 200B（含 \n）= 600KB，跨 3 个 256KB 扫描块
+    let body: Vec<String> = (0..3000)
+        .map(|i| format!("l{i:04}{}", "x".repeat(195)))
+        .collect();
+    std::fs::write(&path, body.join("\n") + "\n")?;
+
+    let (mut sess, _jh) = ActiveSession::spawn_local_file(path.to_string_lossy().into_owned(), 2500);
+
+    let mut got = Vec::new();
+    for _ in 0..200 {
+        match sess.rx.try_recv() {
+            Ok(StreamEvent::Lines(ls)) => got.extend(ls),
+            Ok(StreamEvent::Ended) => break,
+            Err(TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await
+            }
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    assert_eq!(got.len(), 2500, "tail=2500 → 恰好回放 2500 行");
+    assert_eq!(got[0], body[500], "首行 = 末尾 2500 行的第一行");
+    assert_eq!(got[2499], body[2999], "末行 = 文件最后一行");
+
+    let ActiveSession { stop_tx, rx, .. } = sess;
+    let _ = stop_tx.send(());
+    drop(rx);
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
 /// [v0.8.1] sudo -S 密码流端到端：密码写 stdin → 服务端 data 回调比对 → 回放数据。
 /// 验证 do_connect 的 make_writer 写入 + eof 路径与 do_connect 完全一致的手写序列。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
