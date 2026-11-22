@@ -503,7 +503,14 @@ fn log_row(
     fm: &FilterMode,
     scroll_x: u16,
 ) -> Line<'static> {
-    let base = Style::default().fg(level_color(line.level));
+    // [v0.11.0] 颜色/语义分离：推断级（非显式 token，类名误染来源）降 DarkGray；
+    // 过滤语义仍以 line.level 为准不受影响
+    let fg = if line.level_explicit {
+        level_color(line.level)
+    } else {
+        Color::DarkGray
+    };
+    let base = Style::default().fg(fg);
     let mut spans = vec![Span::styled(
         format!("{} ", line.level.label()),
         if selected {

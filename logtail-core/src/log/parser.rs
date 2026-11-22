@@ -32,6 +32,54 @@ pub fn detect_level(text: &str) -> LogLevel {
     LogLevel::Unknown
 }
 
+/// [v0.11.0] 显式级别 token（与 detect_level 的正文关键词推断相对）：
+/// 1) logfmt/JSON 字段：`level=error` / `"level":"error"`（最结构化，优先）
+/// 2) 括号式：`[ERROR]` `[WARN]`（logback/log4j 常见，行内任意位置）
+/// 3) 行首裸词：`ERROR` / `WARN` / `INFO` / `DEBUG`（logback %-5level 列，
+///    时间戳前缀剥掉后再认；`\b` 词边界——`ErrorReportValve` 的 ErrorR 无边界不命中）
+///
+/// 命中即视为记录的权威级别（覆盖正文关键词推断）；None = 无显式标记。
+pub fn detect_level_token(text: &str) -> Option<LogLevel> {
+    lazy_static::lazy_static! {
+        // JSON 字段："level":"error"（带引号值）
+        static ref RE_JSON: regex::Regex = regex::Regex::new(
+            r#"(?i)"level"\s*:\s*"(trace|debug|info|notice|warn(?:ing)?|error|fatal|severe|critical)""#
+        ).unwrap();
+        // logfmt：level=error（值取裸单词；level 前须是行首/空白/分隔——防 sublevel=）
+        static ref RE_LOGFMT: regex::Regex = regex::Regex::new(
+            r"(?i)(?:^|[\s,;])level=(trace|debug|info|notice|warn(?:ing)?|error|fatal|severe|critical)\b"
+        ).unwrap();
+        static ref RE_BRACKET: regex::Regex = regex::Regex::new(
+            r"(?i)\[(trace|debug|info|notice|warn(?:ing)?|error|fatal|severe|critical)\]"
+        ).unwrap();
+        static ref RE_BARE: regex::Regex = regex::Regex::new(
+            r"(?i)^[ \t]*(trace|debug|info|notice|warn(?:ing)?|error|fatal|severe|critical)\b"
+        ).unwrap();
+    }
+    fn map(word: &str) -> LogLevel {
+        match word {
+            "fatal" | "severe" | "critical" | "error" => LogLevel::Error,
+            "warn" | "warning" => LogLevel::Warn,
+            "info" | "notice" => LogLevel::Info,
+            _ => LogLevel::Debug, // trace/debug
+        }
+    }
+    if let Some(c) = RE_JSON.captures(text) {
+        return Some(map(&c[1].to_lowercase()));
+    }
+    if let Some(c) = RE_LOGFMT.captures(text) {
+        return Some(map(&c[1].to_lowercase()));
+    }
+    if let Some(c) = RE_BRACKET.captures(text) {
+        return Some(map(&c[1].to_lowercase()));
+    }
+    let stripped = strip_ts_prefix(text);
+    if let Some(c) = RE_BARE.captures(stripped) {
+        return Some(map(&c[1].to_lowercase()));
+    }
+    None
+}
+
 /// 一行 → LogLine（§5.4）。只解析一次；包壳 time 作为首选，正文 RFC3339 仅兜底。
 pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
     let mut line = LogLine {
@@ -61,7 +109,10 @@ pub fn parse_line(raw: String, src_type: SourceType) -> LogLine {
         line.raw = strip_docker_ts_prefix(&line.raw).to_string();
     }
     line.refresh_body(); // [v0.10.8] body 不再存副本，记 raw 内后缀区间
-    line.level = detect_level(&line.raw);
+    // [v0.11.0] 显式 token 优先：级别字段是记录的权威级别，正文关键词只是兜底
+    // （`[DEBUG] 消息里提到 error` 应按 DEBUG 过滤，不该被关键词顶成 ERROR）
+    line.level_explicit = detect_level_token(&line.raw).is_some();
+    line.level = detect_level_token(&line.raw).unwrap_or_else(|| detect_level(&line.raw));
     line.trace_id = extract_trace_id(&line.raw); // §19：简单正则，来源级映射留配置化
     line
 }
@@ -84,7 +135,9 @@ pub fn parse_line_multi(raw: String, src_type: SourceType) -> Vec<LogLine> {
                 ..Default::default()
             };
             l.refresh_body(); // [v0.10.8] raw 已定稿，按后缀区间记 body
-            l.level = detect_level(s);
+            // [v0.11.0] 显式 token 优先（同 parse_line）
+            l.level_explicit = detect_level_token(s).is_some();
+            l.level = detect_level_token(s).unwrap_or_else(|| detect_level(s));
             l.timestamp = head.timestamp.or_else(|| extract_timestamp(s));
             l.trace_id = extract_trace_id(s);
             l
@@ -211,6 +264,57 @@ mod tests {
             LogLevel::Warn,
             "warn 优先级不变"
         );
+    }
+
+    #[test]
+    fn level_token_显式标记的三种形态与误染免疫() {
+        // logfmt/JSON 字段
+        assert_eq!(
+            detect_level_token(r#"{"level":"error","msg":"boom"}"#),
+            Some(LogLevel::Error)
+        );
+        assert_eq!(detect_level_token("ts=2026-01-05 level=warn msg=x"), Some(LogLevel::Warn));
+        // 括号式（行内任意位置，时间戳后也算）
+        assert_eq!(
+            detect_level_token("2026-11-07 10:00:01 [ERROR] c.i.Main: boom"),
+            Some(LogLevel::Error)
+        );
+        assert_eq!(detect_level_token(" INFO [thread] ok"), Some(LogLevel::Info));
+        // 行首裸词（%-5level 列；时间戳前缀剥掉后行首）
+        assert_eq!(detect_level_token("ERROR connection refused"), Some(LogLevel::Error));
+        assert_eq!(
+            detect_level_token("2026-11-07 10:00:01.123 WARN deprecation"),
+            Some(LogLevel::Warn)
+        );
+        // 类名误染免疫：ErrorReportValve 的 ErrorR 无词边界；TraceFilter 不在行首
+        assert_eq!(detect_level_token("at org.apache.catalina.valves.ErrorReportValve.invoke(X.java:83)"), None);
+        assert_eq!(detect_level_token("at cn.iocoder.yudao.framework.tracer.core.filter.TraceFilter.doFilterInternal(T.java:45)"), None);
+        // 词边界不误伤行首复数：Errors ≠ ERROR
+        assert_eq!(detect_level_token("Errors occurred in 3 jobs"), None);
+        // 无标记 → None
+        assert_eq!(detect_level_token("at org.springframework.web.filter.OncePerRequestFilter.doFilter(X.java:116)"), None);
+    }
+
+    #[test]
+    fn parse_line_显式token覆盖正文推断_语义与标记同步() {
+        // 显式 [DEBUG] + 正文含 error：token 是权威级别
+        let l = parse_line("[DEBUG] retry after error".into(), SourceType::LocalFile);
+        assert_eq!(l.level, LogLevel::Debug, "token 覆盖关键词");
+        assert!(l.level_explicit);
+        // 无 token：正文推断，level 不变但标记 false（渲染降灰用）
+        let l = parse_line("at org.apache.catalina.valves.ErrorReportValve.invoke(X:83)".into(), SourceType::LocalFile);
+        assert_eq!(l.level, LogLevel::Error, "关键词兜底语义不变（ERROR+ 过滤仍可见）");
+        assert!(!l.level_explicit, "推断级不染色");
+        // 多行记录子行同样走 token 覆盖
+        let lines = parse_line_multi(
+            r#"{"log":"[WARN] rate limit\nbody mentions fatal error","stream":"stderr","time":"2026-01-05T14:02:04.123+08:00"}"#.into(),
+            SourceType::Docker,
+        );
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].level, LogLevel::Warn);
+        assert!(lines[0].level_explicit);
+        assert_eq!(lines[1].level, LogLevel::Error, "子行正文推断兜底");
+        assert!(!lines[1].level_explicit);
     }
 
     #[test]

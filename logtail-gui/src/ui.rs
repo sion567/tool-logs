@@ -14,7 +14,7 @@ use eframe::egui::{
 };
 
 use logtail_core::config::{Config, SourceConfig};
-use logtail_core::log::{export_session, export_session_view};
+use logtail_core::log::{export_session, export_session_view, LogLevel};
 use logtail_core::log::filter::LevelFilter;
 use logtail_core::source::{LogSource, ModeVariant, Preset, check_pattern, next_earlier_mode};
 use logtail_core::ssh::StreamEvent;
@@ -36,6 +36,9 @@ pub(crate) const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
 const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
 /// [v0.1.6] 详情条次要信息（时间/源）颜色
 const DETAIL_MUTED: Color32 = Color32::from_rgb(110, 110, 110);
+/// [v0.11.0] 堆栈跟随的缩进行颜色（#5A5A5A）：白底对比度 ~7:1（WCAG AAA 线），
+/// 退后感保留但比详情条的浅灰更耐看——独立于 DETAIL_MUTED，调深不连带详情条
+const STACK_FG: Color32 = Color32::from_rgb(90, 90, 90);
 /// [v0.1.6] trace_id 色
 const TRACE_FG: Color32 = Color32::from_rgb(0, 120, 160);
 /// [v0.2.0] sparkline 柱色（青蓝，与 TUI Cyan 同心智）
@@ -72,6 +75,12 @@ pub struct LogTailApp {
     /// [v0.11.0] 合并时间线选源窗口开关 + 已勾选源名
     show_merge: bool,
     merge_pick: Vec<String>,
+    /// [v0.11.0] 自定义颜色规则窗口开关；规则编译缓存（prefs 变化才重编）
+    show_color_rules: bool,
+    color_rule_cache: Vec<(regex::Regex, Color32)>,
+    color_rule_key: String,
+    /// [v0.11.0] 管理收藏过滤窗口开关
+    show_saved_cfg: bool,
     /// 每帧落盘去抖
     prefs_dirty: bool,
     /// [v0.2.4] 服务器/源/预设管理窗口（manage.rs）
@@ -96,6 +105,10 @@ impl LogTailApp {
             show_viewer_cfg: false,
             show_merge: false,
             merge_pick: Vec::new(),
+            show_color_rules: false,
+            color_rule_cache: Vec::new(),
+            color_rule_key: String::new(),
+            show_saved_cfg: false,
             prefs_dirty: false,
             manage: crate::manage::ManageState::default(),
         }
@@ -665,6 +678,184 @@ impl LogTailApp {
         }
     }
 
+    /// [v0.11.0] 管理收藏过滤窗口：增删改（名称/过滤词/正则开关）。pattern 或
+    /// regex_on 改动/删除时，从所有 tab 的生效链摘除旧 pattern——防止旧编译
+    /// 结果残留继续过滤（勾选态按 pattern 匹配，改键后旧链对不上 UI 会静默漂移）
+    fn saved_cfg_dialog(&mut self, ctx: &Context) {
+        if !self.show_saved_cfg {
+            return;
+        }
+        let mut open = self.show_saved_cfg;
+        egui::Window::new("管理收藏过滤")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "每条 = 名称 + 过滤词（文本按 | 拆多关键词 / 正则按开关编译）。\n查看菜单里点击开/关，多个同时开 = AND 叠加。",
+                    )
+                    .weak(),
+                );
+                ui.separator();
+                let mut removed: Option<usize> = None;
+                let mut invalidated: Vec<String> = Vec::new();
+                for (i, r) in self.prefs.saved_filters.iter_mut().enumerate() {
+                    let old = r.pattern.clone();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                TextEdit::singleline(&mut r.name)
+                                    .desired_width(110.0)
+                                    .hint_text("名称"),
+                            )
+                            .changed()
+                        {
+                            self.prefs_dirty = true;
+                        }
+                        if ui
+                            .add(
+                                TextEdit::singleline(&mut r.pattern)
+                                    .desired_width(240.0)
+                                    .hint_text("过滤词"),
+                            )
+                            .changed()
+                            && r.pattern != old
+                        {
+                            invalidated.push(old);
+                            self.prefs_dirty = true;
+                        }
+                        if ui.checkbox(&mut r.regex_on, "正则").changed() {
+                            invalidated.push(r.pattern.clone()); // 编译模式变化 → 摘除重勾
+                            self.prefs_dirty = true;
+                        }
+                        if ui.small_button("✕").clicked() {
+                            removed = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = removed {
+                    let gone = self.prefs.saved_filters.remove(i);
+                    invalidated.push(gone.pattern);
+                    self.prefs_dirty = true;
+                }
+                if !invalidated.is_empty() {
+                    for t in &mut self.tabs {
+                        t.pinned.retain(|(p, _)| !invalidated.contains(p));
+                    }
+                }
+                if self.prefs.saved_filters.is_empty() {
+                    ui.label(RichText::new("（还没有收藏）").weak());
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("＋ 添加").clicked() {
+                        self.prefs.saved_filters.push(crate::prefs::SavedFilter {
+                            name: "新收藏".into(),
+                            pattern: String::new(),
+                            regex_on: false,
+                        });
+                        self.prefs_dirty = true;
+                    }
+                    let has_input = self
+                        .active_tab_idx()
+                        .and_then(|ti| self.tabs.get(ti))
+                        .is_some_and(|t| !t.filter_input.trim().is_empty());
+                    if ui
+                        .add_enabled(has_input, egui::Button::new("★ 把当前过滤框存入"))
+                        .on_hover_text("把激活 tab 过滤框的当前内容存为一条收藏")
+                        .clicked()
+                    {
+                        self.save_current_filter();
+                    }
+                });
+            });
+        self.show_saved_cfg = open;
+        if !open {
+            self.prefs_dirty = true;
+        }
+    }
+
+    /// [v0.11.0] 自定义颜色规则编译缓存：prefs 变化才重编（逐帧编译正则不可接受）；
+    /// 非法正则/hex 的规则静默跳过（设置窗口里可自行核对）
+    fn color_rules(&mut self) -> Vec<(regex::Regex, Color32)> {
+        let key = format!("{:?}", self.prefs.color_rules);
+        if self.color_rule_key != key {
+            self.color_rule_cache = self
+                .prefs
+                .color_rules
+                .iter()
+                .filter_map(|r| {
+                    regex::Regex::new(&r.pattern)
+                        .ok()
+                        .and_then(|re| Color32::from_hex(&r.color).ok().map(|c| (re, c)))
+                })
+                .collect();
+            self.color_rule_key = key;
+        }
+        self.color_rule_cache.clone()
+    }
+
+    /// [v0.11.0] 自定义颜色规则设置窗口（Multitail 心智：正则→颜色，首条命中覆盖）
+    fn color_rules_dialog(&mut self, ctx: &Context) {
+        if !self.show_color_rules {
+            return;
+        }
+        let mut open = self.show_color_rules;
+        egui::Window::new("自定义颜色规则")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new(
+                        "正则命中 → 文字色覆盖（自上而下首条命中优先；非法正则/hex 的规则被跳过）。",
+                    )
+                    .weak(),
+                );
+                ui.separator();
+                let mut removed: Option<usize> = None;
+                for (i, r) in self.prefs.color_rules.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        let mut c = Color32::from_hex(&r.color).unwrap_or(Color32::WHITE);
+                        if ui.color_edit_button_srgba(&mut c).changed() {
+                            r.color = c.to_hex();
+                            self.prefs_dirty = true;
+                        }
+                        if ui
+                            .add(
+                                TextEdit::singleline(&mut r.pattern)
+                                    .desired_width(340.0)
+                                    .hint_text("正则，如 TraceFilter|RateLimit"),
+                            )
+                            .changed()
+                        {
+                            self.prefs_dirty = true;
+                        }
+                        if ui.small_button("✕").clicked() {
+                            removed = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = removed {
+                    self.prefs.color_rules.remove(i);
+                    self.prefs_dirty = true;
+                }
+                if self.prefs.color_rules.is_empty() {
+                    ui.label(RichText::new("（还没有规则）").weak());
+                }
+                if ui.button("＋ 添加规则").clicked() {
+                    self.prefs.color_rules.push(crate::prefs::ColorRule {
+                        pattern: String::new(),
+                        color: "#E06C75".into(),
+                    });
+                    self.prefs_dirty = true;
+                }
+            });
+        self.show_color_rules = open;
+        if !open {
+            self.prefs_dirty = true;
+        }
+    }
+
     /// [v0.11.0] 外部查看器命令模板设置窗口
     fn viewer_cfg_dialog(&mut self, ctx: &Context) {
         if !self.show_viewer_cfg {
@@ -973,6 +1164,8 @@ impl eframe::App for LogTailApp {
         self.connect_dialog(&ctx);
         self.viewer_cfg_dialog(&ctx);
         self.merge_dialog(&ctx);
+        self.color_rules_dialog(&ctx);
+        self.saved_cfg_dialog(&ctx);
         self.manage_window(&ctx);
         self.handle_dnd(&ctx);
         self.handle_shortcuts(&ctx);
@@ -1061,6 +1254,53 @@ impl LogTailApp {
                     } else {
                         ui.label(RichText::new("日志级别（无激活 tab）").weak());
                     }
+                    // [v0.11.0] 收藏过滤（原工具栏 chips 移入——工具栏宽度告急）：
+                    // 点击开/关，多选与过滤框 AND 叠加；管理窗口支持自定义增删改
+                    ui.separator();
+                    ui.label(RichText::new("收藏过滤（多选 AND 叠加）").weak());
+                    let saved = self.prefs.saved_filters.clone();
+                    let mut toggled: Option<(String, bool)> = None;
+                    for sf in &saved {
+                        let on = self
+                            .active_tab_idx()
+                            .and_then(|ti| self.tabs.get(ti))
+                            .is_some_and(|t| t.pinned_on(&sf.pattern));
+                        if ui
+                            .selectable_label(on, &sf.name)
+                            .on_hover_text(format!(
+                                "{}\n勾选 = 生效（与本 tab 过滤框 AND 叠加）",
+                                sf.pattern
+                            ))
+                            .clicked()
+                        {
+                            toggled = Some((sf.pattern.clone(), sf.regex_on));
+                        }
+                    }
+                    if let Some((p, re)) = toggled
+                        && let Some(ti) = self.active_tab_idx()
+                    {
+                        match self.tabs[ti].toggle_pinned(&p, re) {
+                            Ok(true) => self.status = format!("收藏过滤「{p}」开启（AND 叠加）"),
+                            Ok(false) => self.status = format!("收藏过滤「{p}」关闭"),
+                            Err(e) => self.status = format!("收藏过滤无效: {e}"),
+                        }
+                    }
+                    let has_input = self
+                        .active_tab_idx()
+                        .and_then(|ti| self.tabs.get(ti))
+                        .is_some_and(|t| !t.filter_input.trim().is_empty());
+                    if ui
+                        .add_enabled(has_input, egui::Button::new("★ 收藏当前过滤词"))
+                        .on_hover_text("把过滤框当前内容存为收藏（gui.toml 持久化）")
+                        .clicked()
+                    {
+                        self.save_current_filter();
+                    }
+                    if ui.button("⚙ 管理收藏过滤…").clicked() {
+                        self.show_saved_cfg = true;
+                        ui.close();
+                    }
+                    ui.separator();
                     let mut reverse = self.prefs.reverse;
                     if ui
                         .checkbox(&mut reverse, "倒序显示（最新在顶）")
@@ -1163,6 +1403,15 @@ impl LogTailApp {
                         }
                     });
                     ui.separator();
+                    // [v0.11.0] 自定义颜色规则（Multitail 心智：正则→文字色）
+                    if ui
+                        .button("自定义颜色规则…")
+                        .on_hover_text("正则命中 → 文字色覆盖（首条命中优先），存 gui.toml")
+                        .clicked()
+                    {
+                        self.show_color_rules = true;
+                        ui.close();
+                    }
                     if ui
                         .button("管理服务器与源…")
                         .on_hover_text("在窗口里增删改 config.toml 的服务器/源/预设（自动备份 config.toml.bak）")
@@ -1338,52 +1587,8 @@ impl LogTailApp {
                     ui.colored_label(ERR_FG, format!("正则无效: {err}"));
                 }
 
-                // [v0.11.0] 收藏过滤 chips：点击开/关（与过滤框 AND 叠加，可多选），
-                // 右键删除；「★存」把当前过滤词存为按钮（gui.toml 持久化，预置 3 条种子）
-                if !self.prefs.saved_filters.is_empty()
-                    || !self.tabs[ti].filter_input.is_empty()
-                {
-                    let saved = self.prefs.saved_filters.clone();
-                    let mut toggled: Option<(String, bool)> = None;
-                    let mut removed: Option<String> = None;
-                    for sf in &saved {
-                        let on = self.tabs[ti].pinned_on(&sf.pattern);
-                        let btn = egui::Button::new(RichText::new(&sf.name).strong())
-                            .small()
-                            .fill(if on { HIT_BG } else { LOG_BG });
-                        let r = ui.add(btn).on_hover_text(format!(
-                            "{}\n点击开/关（与过滤框 AND 叠加）· 右键删除",
-                            sf.pattern
-                        ));
-                        if r.clicked() {
-                            toggled = Some((sf.pattern.clone(), sf.regex_on));
-                        }
-                        if r.secondary_clicked() {
-                            removed = Some(sf.pattern.clone());
-                        }
-                    }
-                    if !self.tabs[ti].filter_input.is_empty()
-                        && ui
-                            .small_button("★存")
-                            .on_hover_text("把当前过滤词存为收藏按钮（gui.toml 持久化）")
-                            .clicked()
-                    {
-                        self.save_current_filter();
-                    }
-                    if let Some((p, re)) = toggled {
-                        match self.tabs[ti].toggle_pinned(&p, re) {
-                            Ok(true) => self.status = format!("收藏过滤「{p}」开启（AND 叠加）"),
-                            Ok(false) => self.status = format!("收藏过滤「{p}」关闭"),
-                            Err(e) => self.status = format!("收藏过滤无效: {e}"),
-                        }
-                    }
-                    if let Some(p) = removed {
-                        self.prefs.saved_filters.retain(|sf| sf.pattern != p);
-                        self.tabs[ti].pinned.retain(|(pat, _)| *pat != p);
-                        self.prefs_dirty = true;
-                        self.status = format!("已删除收藏过滤「{p}」");
-                    }
-                }
+                // [v0.11.0] 收藏过滤 chips 已移入「查看」菜单（工具栏宽度告急）；
+                // 管理入口同在菜单里（见 view_menu 的收藏过滤区）
 
                 // [v0.11.0] 上下文 ±N：命中行连前后 N 行一起显示（Java 堆栈不拆散），
                 // 上下文行不受过滤/级别约束（白底，命中行仍黄底）。N 全局记忆（gui.toml），
@@ -1763,6 +1968,7 @@ impl LogTailApp {
         user_scroll_y: bool,
     ) {
         let stack_follow = self.prefs.stack_follow; // [v0.11.0] 堆栈跟随（渲染层开关）
+        let color_rules = self.color_rules(); // [v0.11.0] 自定义颜色规则（编译缓存）
         // 栏头占用的实际高度从内容高里扣掉，否则窗格内容超出分配盒
         // （首帧定位/跳底/滚动条都会随之错位）
         let head_h = if show_header {
@@ -1864,10 +2070,18 @@ impl LogTailApp {
                         // 选中/右键/复制全按 line_no，不受行序影响
                         let di = if reverse { n - 1 - i } else { i };
                         let Some(&(no, group_n)) = tab.display.get(di) else { continue };
-                        let Some((raw, level, ts, trace)) = tab
+                        let Some((raw, level, ts, trace, explicit)) = tab
                             .buffer
                             .by_line_no(no)
-                            .map(|l| (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone()))
+                            .map(|l| {
+                                (
+                                    l.raw.clone(),
+                                    l.level,
+                                    l.timestamp,
+                                    l.trace_id.clone(),
+                                    l.level_explicit,
+                                )
+                            })
                         else {
                             continue;
                         };
@@ -1890,11 +2104,22 @@ impl LogTailApp {
                         // 时间戳行）。纯渲染层——过滤/复制/导出/选中不受影响；
                         // 命中行保持黄底与命中色（命中优先于灰显）
                         let is_cont = stack_follow && ts.is_none();
-                        let color = if is_cont && !hit {
-                            DETAIL_MUTED
+                        // [v0.11.0] 颜色/语义分离：level_explicit=false 的推断级降灰——
+                        // ErrorReportValve 类名误染消失；ERROR+ 过滤语义不受影响
+                        let mut color = if is_cont && !hit {
+                            STACK_FG
+                        } else if !explicit {
+                            level_color(LogLevel::Unknown)
                         } else {
                             level_color(level)
                         };
+                        // [v0.11.0] 自定义颜色规则：自上而下首条命中覆盖文字色（级别色兜底）
+                        for (re, c) in &color_rules {
+                            if re.is_match(&raw) {
+                                color = *c;
+                                break;
+                            }
+                        }
                         let indent = if is_cont { 24.0 } else { 0.0 };
                         // [v0.2.0] 折叠组行尾 ×N；←→ 横滚整体平移（主视图仍单行裁剪，
                         // 超出由 ScrollArea 裁剪，长行全文看详情条）

@@ -35,6 +35,14 @@ fn default_saved_filters() -> Vec<SavedFilter> {
     ]
 }
 
+/// [v0.11.0] 自定义颜色规则（Multitail 心智）：正则命中 → 文字色覆盖，
+/// 自上而下首条命中优先；color 存 hex（如 "#E06C75"），非法正则/hex 加载时跳过
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorRule {
+    pub pattern: String,
+    pub color: String,
+}
+
 /// [v0.2.0] 启动自动恢复的上次激活 tab（与 TUI remember_last_source 同心智）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -61,6 +69,8 @@ pub struct Prefs {
     pub viewer_cmd: String,
     /// [v0.11.0] 过滤输入历史（新→旧，cap 10）：过滤框回车记录，▼ 下拉回填
     pub filter_history: Vec<String>,
+    /// [v0.11.0] 自定义颜色规则（正则→文字色，首条命中覆盖级别色）
+    pub color_rules: Vec<ColorRule>,
     /// 窗口置顶（BareTail always-on-top）
     pub always_on_top: bool,
     /// 最近打开的文件（新→旧）
@@ -98,6 +108,7 @@ impl Default for Prefs {
             stack_follow: false,
             viewer_cmd: String::new(),
             filter_history: Vec::new(),
+            color_rules: Vec::new(),
             always_on_top: false,
             recent_files: Vec::new(),
             saved_filters: default_saved_filters(),
@@ -180,6 +191,10 @@ mod tests {
             stack_follow: true,
             viewer_cmd: "lnav {file}".into(),
             filter_history: vec!["ERROR".into()],
+            color_rules: vec![ColorRule {
+                pattern: "RateLimit".into(),
+                color: "#E06C75".into(),
+            }],
             always_on_top: true,
             recent_files: vec!["C:/logs/a.log".into(), "D:/b.out".into()],
             saved_filters: vec![SavedFilter {

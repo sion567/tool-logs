@@ -12,7 +12,7 @@ pub use filter::{
     active_filter_of, matches_filter, rebuild_view, rebuild_view_ctx, text_patterns, FilterMode,
     FilterState, LevelFilter, NO_FILTER,
 };
-pub use parser::{detect_level, parse_line, parse_line_multi};
+pub use parser::{detect_level, detect_level_token, parse_line, parse_line_multi};
 use parser::strip_ts_prefix;
 
 use std::sync::Arc;
@@ -34,6 +34,10 @@ use chrono::{DateTime, Utc};
 pub struct LogLine {
     pub raw: String,
     pub level: LogLevel,
+    /// [v0.11.0] 级别是否来自显式 token（`[ERROR]`/行首级别列/logfmt level=）。
+    /// false = detect_level 的正文关键词推断（类名误染来源）——语义（过滤可见集）
+    /// 仍以 level 为准，颜色按此标记分离：推断级渲染降灰
+    pub level_explicit: bool,
     pub timestamp: Option<DateTime<Utc>>,
     /// 逻辑源名，如 "prod-01/my-app"（[v0.10.8] Arc 共享，测试 `"x".into()` 照常可用）
     pub source: Arc<str>,

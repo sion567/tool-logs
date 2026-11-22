@@ -42,7 +42,13 @@ pub(super) fn journal_command(
         check_time_value(u)?;
     }
 
-    let mut p = vec!["journalctl".to_string()];
+    let mut p = vec![
+        "journalctl".to_string(),
+        // [v0.11.0] short-iso 行首 = "2026-11-07T10:00:01+08:00"——extract_timestamp
+        // 的正则直接识别（默认 short 的 "Nov 07 10:00:01" 月名格式抽不到 ts，
+        // 合并时间线里该源会整段失去排序锚点）
+        "--output=short-iso".to_string(),
+    ];
     if mode.follow() {
         p.push("-f".to_string()); // §10 唯一真理：Range 不带 -f
     }
@@ -61,6 +67,22 @@ pub(super) fn journal_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [v0.11.0] 回归：命令必须带 --output=short-iso——默认 short 的月名时间
+    /// 抽不到行内 ts，合并时间线里 journal 源整段失去排序锚点
+    #[test]
+    fn journal_命令带_short_iso输出() {
+        let cmd = journal_command(
+            "systemd",
+            None,
+            &ModeVariant::Full,
+        )
+        .unwrap();
+        assert!(
+            cmd.contains("--output=short-iso"),
+            "命令需含 short-iso 输出: {cmd}"
+        );
+    }
 
     #[test]
     fn 相对时长换算为绝对时间() {
