@@ -68,6 +68,10 @@ fn configure_windows_backends(_options: &mut eframe::NativeOptions) {}
 /// 注入中文字体：egui 内置字体无 CJK 字形，缺了中文全是豆腐块。
 /// 依序找 Windows 常见中文字体，注入到 Proportional 与 Monospace 两个 family
 /// （等宽家族 ASCII 仍用内置等宽，中文回退到系统字体）。
+/// [v0.11.0] 顺带注册 Consolas（ASCII 主等宽，CSS 设计稿同款）+ 粗体变体
+/// family `logtail-mono-bold`——颜色规则的「加粗」靠它渲染（egui 不合成粗体，
+/// 必须注册真粗体字体文件）。粗体 family 恒注册（找不到粗体文件时退化为常规），
+/// 渲染层可无条件使用。
 fn install_cjk_fonts(ctx: &Context) -> bool {
     const CANDIDATES: &[&str] = &[
         "C:/Windows/Fonts/msyh.ttc", // 微软雅黑
@@ -88,6 +92,27 @@ fn install_cjk_fonts(ctx: &Context) -> bool {
         );
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
             fonts.families.entry(family).or_default().push("cjk".into());
+        }
+        // Consolas：Windows 自带等宽，插入 Monospace 首位（ASCII 走 Consolas，
+        // 中文继续回退 cjk）；粗体变体单独注册成命名 family 供规则加粗用
+        if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/consola.ttf") {
+            fonts
+                .font_data
+                .insert("consolas".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
+            fonts
+                .families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .insert(0, "consolas".into());
+        }
+        let bold_family = FontFamily::Name("logtail-mono-bold".into());
+        let bold = fonts.families.entry(bold_family).or_default();
+        bold.push("cjk".into());
+        if let Ok(bytes) = std::fs::read("C:/Windows/Fonts/consolab.ttf") {
+            fonts
+                .font_data
+                .insert("consolas-bold".into(), std::sync::Arc::new(FontData::from_owned(bytes)));
+            bold.insert(0, "consolas-bold".into());
         }
         ctx.set_fonts(fonts);
         return true;

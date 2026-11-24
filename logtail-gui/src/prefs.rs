@@ -35,30 +35,28 @@ fn default_saved_filters() -> Vec<SavedFilter> {
     ]
 }
 
-/// [v0.11.0] 自定义颜色规则（Multitail 心智）：正则命中 → 文字色覆盖，
-/// 自上而下首条命中优先；color 存 hex（如 "#E06C75"），非法正则/hex 加载时跳过
+/// [v0.11.0] 自定义颜色规则（Multitail 心智）：正则命中 → 文字色覆盖 +
+/// 可选加粗，自上而下首条命中优先；color 存 hex（如 "#E06C75"），
+/// 非法正则/hex 加载时跳过。级别着色的唯一来源（主题只管面板底色/正文/行距）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ColorRule {
     pub pattern: String,
     pub color: String,
+    /// [v0.11.0] 加粗（CSS font-weight: bold；渲染走注册的粗体等宽变体）
+    #[serde(default)]
+    pub bold: bool,
 }
 
-/// [v0.11.0] 面板配色主题：日志区底色/正文色/堆栈灰 + 四档级别色 + 推断级色。
-/// hex 存储便于手改 gui.toml；非法 hex 由渲染层回落经典白底
+/// [v0.11.0] 面板配色主题——只管 .log-panel 级默认项：底色、正文默认色、
+/// 行距（CSS line-height）。级别/规则的颜色归自定义颜色规则，此处不含
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
     /// 日志区底色
     pub log_bg: String,
-    /// 正文默认色（非命中行、无规则覆盖时）
+    /// 正文默认色（无规则覆盖时的文字色）
     pub log_fg: String,
-    pub error: String,
-    pub warn: String,
-    pub info: String,
-    pub debug: String,
-    /// 推断级降灰（level_explicit=false，类名误染防线的渲染色）
-    pub inferred: String,
-    /// 堆栈跟随的缩进行色
-    pub stack: String,
+    /// 行高倍率（CSS line-height：字号 × 倍率 = 行高）
+    pub line_height: f32,
 }
 
 /// 主题预设：经典白底（历史默认）/ 豆沙绿护眼（UI 同事 CSS 配色）/ 暗黑。
@@ -71,12 +69,7 @@ pub static THEMES: std::sync::LazyLock<Vec<(&'static str, Theme)>> = std::sync::
                 Theme {
                     log_bg: "#FFFFFF".into(),
                     log_fg: "#333333".into(),
-                    error: "#C00000".into(),
-                    warn: "#B06A00".into(),
-                    info: "#1A7A1A".into(),
-                    debug: "#1F6FA8".into(),
-                    inferred: "#333333".into(),
-                    stack: "#5A5A5A".into(),
+                    line_height: 1.5,
                 },
             ),
             (
@@ -84,12 +77,7 @@ pub static THEMES: std::sync::LazyLock<Vec<(&'static str, Theme)>> = std::sync::
                 Theme {
                     log_bg: "#C7EDCC".into(),
                     log_fg: "#333333".into(),
-                    error: "#D32F2F".into(),
-                    warn: "#F57C00".into(),
-                    info: "#1565C0".into(),
-                    debug: "#616161".into(),
-                    inferred: "#757575".into(),
-                    stack: "#616161".into(),
+                    line_height: 1.6,
                 },
             ),
             (
@@ -97,12 +85,7 @@ pub static THEMES: std::sync::LazyLock<Vec<(&'static str, Theme)>> = std::sync::
                 Theme {
                     log_bg: "#1E1F22".into(),
                     log_fg: "#CCCCCC".into(),
-                    error: "#F44336".into(),
-                    warn: "#FFB74D".into(),
-                    info: "#64B5F6".into(),
-                    debug: "#9E9E9E".into(),
-                    inferred: "#757575".into(),
-                    stack: "#8A8F98".into(),
+                    line_height: 1.5,
                 },
             ),
         ]
@@ -362,6 +345,7 @@ mod tests {
             color_rules: vec![ColorRule {
                 pattern: "RateLimit".into(),
                 color: "#E06C75".into(),
+                bold: true,
             }],
             theme: THEMES[1].1.clone(), // 豆沙绿主题往返
             always_on_top: true,
@@ -474,26 +458,21 @@ mod tests {
         }
     }
 
-    /// [v0.11.0] 主题预设的 hex 必须全部合法——渲染层按 hex 解析，坏值整主题失效
     #[test]
     fn theme_presets_hex全部合法() {
         use eframe::egui::Color32;
         for (name, t) in THEMES.iter() {
-            for (field, hex) in [
-                ("log_bg", &t.log_bg),
-                ("log_fg", &t.log_fg),
-                ("error", &t.error),
-                ("warn", &t.warn),
-                ("info", &t.info),
-                ("debug", &t.debug),
-                ("inferred", &t.inferred),
-                ("stack", &t.stack),
-            ] {
+            for (field, hex) in [("log_bg", &t.log_bg), ("log_fg", &t.log_fg)] {
                 assert!(
                     Color32::from_hex(hex).is_ok(),
                     "{name} 主题 {field} hex 非法: {hex}"
                 );
             }
+            assert!(
+                (1.2..=2.5).contains(&t.line_height),
+                "{name} 主题行距越界: {}",
+                t.line_height
+            );
         }
     }
 

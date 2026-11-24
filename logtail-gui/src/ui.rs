@@ -9,12 +9,12 @@
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Color32, Context, Key, MenuBar, RichText, ScrollArea, Sense, TextEdit, ViewportCommand,
-    WindowLevel,
+    self, Color32, Context, FontFamily, Key, MenuBar, RichText, ScrollArea, Sense, TextEdit,
+    ViewportCommand, WindowLevel,
 };
 
 use logtail_core::config::{Config, SourceConfig};
-use logtail_core::log::{export_session, export_session_view, LogLevel};
+use logtail_core::log::{export_session, export_session_view};
 use logtail_core::log::filter::LevelFilter;
 use logtail_core::source::{LogSource, ModeVariant, Preset, check_pattern, next_earlier_mode};
 use logtail_core::ssh::StreamEvent;
@@ -34,44 +34,28 @@ pub(crate) const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
 const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
 /// [v0.1.6] 详情条次要信息（时间/源）颜色
 const DETAIL_MUTED: Color32 = Color32::from_rgb(110, 110, 110);
-// [v0.11.0] LOG_BG / STACK_FG 已并入 prefs.theme（Palette 解析），不再静态定义
+/// [v0.11.0] 堆栈跟随的缩进行色（面板级语义灰，不随主题——主题只管底/正文/行距）
+const STACK_FG: Color32 = Color32::from_rgb(90, 90, 90);
 
-/// [v0.11.0] 主题解析结果：prefs.theme 的 hex → Color32（非法字段回落经典白底），
-/// 渲染层唯一取色口——级别/底色/正文/堆栈/推断全部走它，不再直引常量
+/// [v0.11.0] 主题解析结果：prefs.theme 的 hex → Color32（非法字段回落经典白底）。
+/// 只含面板级默认：底色/正文色/行距——级别与模式着色归自定义颜色规则
 #[derive(Clone, Copy)]
 struct Palette {
     log_bg: Color32,
     log_fg: Color32,
-    error: Color32,
-    warn: Color32,
-    info: Color32,
-    debug: Color32,
-    inferred: Color32,
-    stack: Color32,
+    line_height: f32,
 }
 
 impl Palette {
-    fn level(&self, level: LogLevel) -> Color32 {
-        match level {
-            LogLevel::Error => self.error,
-            LogLevel::Warn => self.warn,
-            LogLevel::Info => self.info,
-            LogLevel::Debug => self.debug,
-            LogLevel::Unknown => self.log_fg,
-        }
-    }
-
     fn from_theme(t: &crate::prefs::Theme) -> Self {
-        let ok = |hex: &str, fb: Color32| Color32::from_hex(hex).unwrap_or(fb);
         Self {
-            log_bg: ok(&t.log_bg, Color32::WHITE),
-            log_fg: ok(&t.log_fg, Color32::from_rgb(51, 51, 51)),
-            error: ok(&t.error, Color32::from_rgb(192, 0, 0)),
-            warn: ok(&t.warn, Color32::from_rgb(176, 106, 0)),
-            info: ok(&t.info, Color32::from_rgb(26, 122, 26)),
-            debug: ok(&t.debug, Color32::from_rgb(31, 111, 168)),
-            inferred: ok(&t.inferred, Color32::from_rgb(51, 51, 51)),
-            stack: ok(&t.stack, Color32::from_rgb(90, 90, 90)),
+            log_bg: Color32::from_hex(&t.log_bg).unwrap_or(Color32::WHITE),
+            log_fg: Color32::from_hex(&t.log_fg).unwrap_or(Color32::from_rgb(51, 51, 51)),
+            line_height: if (1.2..=2.5).contains(&t.line_height) {
+                t.line_height
+            } else {
+                1.5
+            },
         }
     }
 }
@@ -113,7 +97,7 @@ pub struct LogTailApp {
     merge_pick: Vec<String>,
     /// [v0.11.0] 自定义颜色规则窗口开关；规则编译缓存（prefs 变化才重编）
     show_color_rules: bool,
-    color_rule_cache: Vec<(regex::Regex, Color32)>,
+    color_rule_cache: Vec<(regex::Regex, Color32, bool)>,
     color_rule_key: String,
     /// [v0.11.0] 管理收藏过滤窗口开关
     show_saved_cfg: bool,
@@ -331,11 +315,12 @@ impl LogTailApp {
         t.state = SessionState::Connecting;
         self.tabs.push(t);
         self.active = self.tabs.len() - 1;
+        let source = source_with_gui_tail(&sc.source, self.prefs.max_lines);
         let _ = self.pump.cmd_tx.send(PumpCmd::ConnectRemote(Box::new(
             crate::pump::RemoteConnect {
                 id,
                 server: srv.clone(),
-                source: sc.source.clone(),
+                source,
                 mode: ModeVariant::Full,
                 prefilter: None,
             },
@@ -362,7 +347,8 @@ impl LogTailApp {
             let rc = crate::pump::RemoteConnect {
                 id: new_id,
                 server: r.server.clone(),
-                source: r.source.clone(),
+                // [v0.11.0 修复] 重连回放窗口同样跟随 GUI 行数上限
+                source: source_with_gui_tail(&r.source, self.prefs.max_lines),
                 mode: t.mode.clone(),
                 prefilter: t.remote_prefilter.clone(),
             };
@@ -645,7 +631,8 @@ impl LogTailApp {
                     cmds.push(PumpCmd::ConnectRemote(Box::new(crate::pump::RemoteConnect {
                         id: pid,
                         server: srv.clone(),
-                        source: sc.source.clone(),
+                        // [v0.11.0 修复] 合并成员同样按 GUI 行数上限拉取
+                        source: source_with_gui_tail(&sc.source, self.prefs.max_lines),
                         mode: ModeVariant::Full,
                         prefilter: None,
                     })));
@@ -829,7 +816,9 @@ impl LogTailApp {
         self.palette_cache.expect("上面分支已填充")
     }
 
-    /// [v0.11.0] 面板配色窗口：主题预设一键应用 + 八个色位逐个微调（即时生效）
+    /// [v0.11.0] 面板配色窗口：只管 .log-panel 级默认（底色/正文/行距），
+    /// 对应 CSS 的 background-color / color / line-height；级别与模式着色
+    /// 归「自定义颜色规则」，字号在设置菜单（A±）
     fn theme_dialog(&mut self, ctx: &Context) {
         if !self.show_theme_cfg {
             return;
@@ -839,7 +828,7 @@ impl LogTailApp {
             .open(&mut open)
             .default_width(420.0)
             .show(ctx, |ui| {
-                ui.label(RichText::new("预设整组应用，色位可再微调（日志区即时变色）：").weak());
+                ui.label(RichText::new("预设整组应用，可再微调（日志区即时变色）：").weak());
                 ui.horizontal_wrapped(|ui| {
                     for (name, t) in crate::prefs::THEMES.iter() {
                         if ui.small_button(*name).clicked() {
@@ -851,16 +840,7 @@ impl LogTailApp {
                 ui.separator();
                 let mut edited = false;
                 let t = &mut self.prefs.theme;
-                for (label, hex) in [
-                    ("底色", &mut t.log_bg),
-                    ("正文", &mut t.log_fg),
-                    ("ERROR", &mut t.error),
-                    ("WARN", &mut t.warn),
-                    ("INFO", &mut t.info),
-                    ("DEBUG", &mut t.debug),
-                    ("推断级", &mut t.inferred),
-                    ("堆栈", &mut t.stack),
-                ] {
+                for (label, hex) in [("底色", &mut t.log_bg), ("正文", &mut t.log_fg)] {
                     ui.horizontal(|ui| {
                         let mut c = Color32::from_hex(hex).unwrap_or(Color32::WHITE);
                         if ui.color_edit_button_srgba(&mut c).changed() {
@@ -870,10 +850,23 @@ impl LogTailApp {
                         ui.label(label);
                     });
                 }
+                ui.horizontal(|ui| {
+                    ui.label("行距");
+                    if ui
+                        .add(egui::DragValue::new(&mut t.line_height).range(1.2..=2.5).speed(0.05))
+                        .changed()
+                    {
+                        edited = true;
+                    }
+                });
                 if edited {
                     self.prefs_dirty = true;
                 }
                 ui.separator();
+                ui.label(
+                    RichText::new("级别/模式着色与加粗在「自定义颜色规则」里配置；\n字体：ASCII 用 Consolas，中文用系统字体；字号在设置菜单")
+                        .weak(),
+                );
                 ui.label(
                     RichText::new("存 gui.toml；暗黑主题下命中黄底/选中蓝底仍为浅色高亮")
                         .weak(),
@@ -887,7 +880,7 @@ impl LogTailApp {
 
     /// [v0.11.0] 自定义颜色规则编译缓存：prefs 变化才重编（逐帧编译正则不可接受）；
     /// 非法正则/hex 的规则静默跳过（设置窗口里可自行核对）
-    fn color_rules(&mut self) -> Vec<(regex::Regex, Color32)> {
+    fn color_rules(&mut self) -> Vec<(regex::Regex, Color32, bool)> {
         let key = format!("{:?}", self.prefs.color_rules);
         if self.color_rule_key != key {
             self.color_rule_cache = self
@@ -895,14 +888,23 @@ impl LogTailApp {
                 .color_rules
                 .iter()
                 .filter_map(|r| {
-                    regex::Regex::new(&r.pattern)
-                        .ok()
-                        .and_then(|re| Color32::from_hex(&r.color).ok().map(|c| (re, c)))
+                    regex::Regex::new(&r.pattern).ok().and_then(|re| {
+                        Color32::from_hex(&r.color).ok().map(|c| (re, c, r.bold))
+                    })
                 })
                 .collect();
             self.color_rule_key = key;
         }
         self.color_rule_cache.clone()
+    }
+
+    /// [v0.11.0] 单行规则匹配（详情条用）：首条命中 → (色, 加粗)；无命中 None。
+    /// 缓存由渲染路径先行填充（color_rules()），此处只读
+    fn rule_style(&self, raw: &str) -> Option<(Color32, bool)> {
+        self.color_rule_cache
+            .iter()
+            .find(|(re, _, _)| re.is_match(raw))
+            .map(|(_, c, b)| (*c, *b))
     }
 
     /// [v0.11.0] 自定义颜色规则设置窗口（Multitail 心智：正则→颜色，首条命中覆盖）
@@ -939,6 +941,7 @@ impl LogTailApp {
                                 self.prefs.color_rules.push(crate::prefs::ColorRule {
                                     pattern: (*p).to_string(),
                                     color: (*c).to_string(),
+                                    bold: false,
                                 });
                             }
                             self.prefs_dirty = true;
@@ -961,11 +964,15 @@ impl LogTailApp {
                         if ui
                             .add(
                                 TextEdit::singleline(&mut r.pattern)
-                                    .desired_width(340.0)
+                                    .desired_width(300.0)
                                     .hint_text("正则，如 TraceFilter|RateLimit"),
                             )
                             .changed()
                         {
+                            self.prefs_dirty = true;
+                        }
+                        // [v0.11.0] font-weight: bold（渲染走注册的粗体等宽变体）
+                        if ui.checkbox(&mut r.bold, "B").changed() {
                             self.prefs_dirty = true;
                         }
                         if ui.small_button("✕").clicked() {
@@ -984,6 +991,7 @@ impl LogTailApp {
                     self.prefs.color_rules.push(crate::prefs::ColorRule {
                         pattern: String::new(),
                         color: "#E06C75".into(),
+                        bold: false,
                     });
                     self.prefs_dirty = true;
                 }
@@ -1060,7 +1068,9 @@ impl LogTailApp {
         for t in &mut self.tabs {
             t.apply_max_lines(n);
         }
-        self.status = format!("行数上限已改为 {n} 行（已开 tab 即时生效，超出部分淘汰最旧）");
+        self.status = format!(
+            "行数上限已改为 {n} 行：已开 tab 调小立即截断；调大需重连（远程）或重开文件（本地）回填历史"
+        );
     }
 
     /// [v0.2.4] 用系统文本编辑器打开 config.toml（远程源/服务器/预设）。
@@ -1220,6 +1230,20 @@ impl LogTailApp {
             self.open_local(&path);
         }
     }
+}
+
+/// [v0.11.0 修复] 远程会话的 tail 以 GUI「行数上限」为准——config.toml 里源的
+/// tail 只是没配 GUI 时的缺省值。此前远程 tab 原样下发源配置的 tail（如 500），
+/// 设置菜单改 1000/50000 都不动，本地路径修了远程漏网（docker --tail / tail -n
+/// 都吃这个值，命令构造在 core::source）
+fn source_with_gui_tail(source: &LogSource, max_lines: usize) -> LogSource {
+    let mut s = source.clone();
+    match &mut s {
+        LogSource::Docker { tail, .. } | LogSource::File { tail, .. }
+        | LogSource::LocalFile { tail, .. } => *tail = max_lines.max(1),
+        _ => {}
+    }
+    s
 }
 
 impl eframe::App for LogTailApp {
@@ -2049,12 +2073,15 @@ impl LogTailApp {
                         });
                         return;
                     };
+                    // [v0.11.0] 详情条颜色也走规则（首条命中），无规则用正文色
+                    let (dcolor, dbold) =
+                        self.rule_style(&raw).unwrap_or((pal.log_fg, false));
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("详情").strong());
                         if let Some(t) = ts {
                             ui.label(RichText::new(t.to_rfc3339()).color(DETAIL_MUTED));
                         }
-                        ui.label(RichText::new(level.label()).color(pal.level(level)));
+                        ui.label(RichText::new(level.label()).color(dcolor));
                         if !source.is_empty() {
                             ui.label(RichText::new(source.as_ref()).color(DETAIL_MUTED));
                         }
@@ -2089,9 +2116,24 @@ impl LogTailApp {
                         .max_height((bar_h - 64.0).max(40.0))
                         .id_salt(("detailbar", self.tabs[ti].id))
                         .show(ui, |ui| {
+                            // [v0.11.0] 规则加粗在详情条同样生效：FontId 直指粗体 family
+                            //（egui 不合成粗体，family 在启动时注册，见 main.rs）
+                            let mono_id = ui
+                                .style()
+                                .text_styles
+                                .get(&egui::TextStyle::Monospace)
+                                .cloned()
+                                .unwrap_or_else(|| egui::FontId::monospace(14.0));
+                            let family = if dbold {
+                                FontFamily::Name("logtail-mono-bold".into())
+                            } else {
+                                mono_id.family.clone()
+                            };
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&raw).monospace().color(pal.level(level)),
+                                    RichText::new(&raw)
+                                        .color(dcolor)
+                                        .font(egui::FontId::new(mono_id.size, family)),
                                 )
                                 .wrap(),
                             );
@@ -2148,7 +2190,7 @@ impl LogTailApp {
             let tab = &mut self.tabs[ti];
             tab.ensure_view(dedupe, self.prefs.fold_hits);
             let fs = self.prefs.font_size;
-            (fs * 1.5, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
+            (fs * pal.line_height, fs, tab.follow, tab.jump_to_end, tab.last_inner_h)
         };
         let fm = self.tabs[ti].active_filter();
         let n = self.tabs[ti].display.len();
@@ -2221,22 +2263,19 @@ impl LogTailApp {
                         // 选中/右键/复制全按 line_no，不受行序影响
                         let di = if reverse { n - 1 - i } else { i };
                         let Some(&(no, group_n)) = tab.display.get(di) else { continue };
-                        let Some((raw, level, ts, trace, explicit)) = tab
+                        // [v0.11.0] level/level_explicit 不再上色（级别色归规则），
+                        // 详情条等需要时另行取用；行渲染只认 raw/ts
+                        let Some((raw, _level, ts, trace)) = tab
                             .buffer
                             .by_line_no(no)
-                            .map(|l| {
-                                (
-                                    l.raw.clone(),
-                                    l.level,
-                                    l.timestamp,
-                                    l.trace_id.clone(),
-                                    l.level_explicit,
-                                )
-                            })
+                            .map(|l| (l.raw.clone(), l.level, l.timestamp, l.trace_id.clone()))
                         else {
                             continue;
                         };
-                        let hit = raw_hits(&raw, fm.as_ref());
+                        // [v0.11.0 修复] 无过滤时不再整屏黄底：hit 只在确有过滤词时算
+                        // （raw_hits 对 None 恒 true 是"平凡命中"，当底色判据会把
+                        // 全部行刷成 HIT_BG——豆沙绿主题下尤其扎眼）
+                        let hit = fm.is_some() && raw_hits(&raw, fm.as_ref());
                         let selected = tab.selected == Some(no);
                         let rect = egui::Rect::from_min_size(
                             ui.cursor().left_top(),
@@ -2255,19 +2294,18 @@ impl LogTailApp {
                         // 时间戳行）。纯渲染层——过滤/复制/导出/选中不受影响；
                         // 命中行保持黄底与命中色（命中优先于灰显）
                         let is_cont = stack_follow && ts.is_none();
-                        // [v0.11.0] 颜色/语义分离：level_explicit=false 的推断级降灰——
-                        // ErrorReportValve 类名误染消失；ERROR+ 过滤语义不受影响
+                        // [v0.11.0] 职责划分：正文色 = 主题正文色；级别/模式着色
+                        // 全部由自定义颜色规则覆盖（首条命中优先，可加粗）
                         let mut color = if is_cont && !hit {
-                            pal.stack
-                        } else if !explicit {
-                            pal.inferred
+                            STACK_FG
                         } else {
-                            pal.level(level)
+                            pal.log_fg
                         };
-                        // [v0.11.0] 自定义颜色规则：自上而下首条命中覆盖文字色（级别色兜底）
-                        for (re, c) in &color_rules {
+                        let mut bold = false;
+                        for (re, c, b) in &color_rules {
                             if re.is_match(&raw) {
                                 color = *c;
+                                bold = *b;
                                 break;
                             }
                         }
@@ -2279,9 +2317,15 @@ impl LogTailApp {
                         } else {
                             raw.clone()
                         };
+                        // [v0.11.0] 规则加粗：走启动时注册的粗体等宽 family
+                        let family = if bold {
+                            FontFamily::Name("logtail-mono-bold".into())
+                        } else {
+                            FontFamily::Monospace
+                        };
                         let galley = ui.painter().layout_no_wrap(
                             text,
-                            egui::FontId::monospace(font_size),
+                            egui::FontId::new(font_size, family),
                             color,
                         );
                         ui.painter().galley(
@@ -2711,4 +2755,50 @@ fn reveal_in_file_manager(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(non_snake_case)]
+
+    use super::*;
+    use logtail_core::source::LogSource;
+
+    /// [回归] 远程会话 tail 必须以 GUI 行数上限为准（此前原样下发 config.toml
+    /// 源配置的 tail，设置菜单改多少远程 tab 都按配置值拉取——"设置多少都是
+    /// 一个量级"）。无 tail 的源（journalctl/command/loki）原样透传
+    #[test]
+    fn source_with_gui_tail_远程tail覆盖与透传() {
+        let max = 50_000;
+        let docker = LogSource::Docker {
+            container: "svc".into(),
+            tail: 500,
+            follow: true,
+            since: None,
+            until: None,
+        };
+        match source_with_gui_tail(&docker, max) {
+            LogSource::Docker { tail, .. } => assert_eq!(tail, max, "docker tail 被覆盖"),
+            other => panic!("variant 变了: {other:?}"),
+        }
+        let file = LogSource::File {
+            path: "/var/log/x.log".into(),
+            tail: 100,
+        };
+        match source_with_gui_tail(&file, max) {
+            LogSource::File { tail, path } => {
+                assert_eq!(tail, max);
+                assert_eq!(path, "/var/log/x.log", "其余字段保持");
+            }
+            other => panic!("variant 变了: {other:?}"),
+        }
+        let journal = LogSource::Journalctl {
+            service: "ssh".into(),
+            since: None,
+        };
+        assert!(
+            matches!(source_with_gui_tail(&journal, max), LogSource::Journalctl { service, since: None } if service == "ssh"),
+            "无 tail 源透传"
+        );
+    }
 }
