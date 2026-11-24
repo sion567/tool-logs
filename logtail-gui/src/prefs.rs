@@ -43,6 +43,171 @@ pub struct ColorRule {
     pub color: String,
 }
 
+/// [v0.11.0] 面板配色主题：日志区底色/正文色/堆栈灰 + 四档级别色 + 推断级色。
+/// hex 存储便于手改 gui.toml；非法 hex 由渲染层回落经典白底
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Theme {
+    /// 日志区底色
+    pub log_bg: String,
+    /// 正文默认色（非命中行、无规则覆盖时）
+    pub log_fg: String,
+    pub error: String,
+    pub warn: String,
+    pub info: String,
+    pub debug: String,
+    /// 推断级降灰（level_explicit=false，类名误染防线的渲染色）
+    pub inferred: String,
+    /// 堆栈跟随的缩进行色
+    pub stack: String,
+}
+
+/// 主题预设：经典白底（历史默认）/ 豆沙绿护眼（UI 同事 CSS 配色）/ 暗黑。
+/// LazyLock：String 字段不能进 const 上下文
+pub static THEMES: std::sync::LazyLock<Vec<(&'static str, Theme)>> = std::sync::LazyLock::new(
+    || {
+        vec![
+            (
+                "经典白底",
+                Theme {
+                    log_bg: "#FFFFFF".into(),
+                    log_fg: "#333333".into(),
+                    error: "#C00000".into(),
+                    warn: "#B06A00".into(),
+                    info: "#1A7A1A".into(),
+                    debug: "#1F6FA8".into(),
+                    inferred: "#333333".into(),
+                    stack: "#5A5A5A".into(),
+                },
+            ),
+            (
+                "豆沙绿护眼",
+                Theme {
+                    log_bg: "#C7EDCC".into(),
+                    log_fg: "#333333".into(),
+                    error: "#D32F2F".into(),
+                    warn: "#F57C00".into(),
+                    info: "#1565C0".into(),
+                    debug: "#616161".into(),
+                    inferred: "#757575".into(),
+                    stack: "#616161".into(),
+                },
+            ),
+            (
+                "暗黑",
+                Theme {
+                    log_bg: "#1E1F22".into(),
+                    log_fg: "#CCCCCC".into(),
+                    error: "#F44336".into(),
+                    warn: "#FFB74D".into(),
+                    info: "#64B5F6".into(),
+                    debug: "#9E9E9E".into(),
+                    inferred: "#757575".into(),
+                    stack: "#8A8F98".into(),
+                },
+            ),
+        ]
+    },
+);
+
+impl Default for Theme {
+    fn default() -> Self {
+        THEMES[0].1.clone()
+    }
+}
+
+/// [v0.11.0] 颜色规则预设组（Multitail scheme 心智）：常见技术栈的正则→颜色
+/// 组合一键导入，再按需微调。色值与级别色板同系（红=#C00000/黄褐=#B06A00/
+/// 绿=#1A7A1A/蓝=#1F6FA8），阅读心智一致
+pub const COLOR_PRESETS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Java",
+        &[
+            // \b 词边界（括号/空白都是边界）→ 同时命中 `[ERROR]`、`%-5level` 裸词
+            // （` INFO `）、行首 `ERROR` 三种排版；大小写敏感——消息正文里小写
+            // error 不误染，JSON 小写 "level":"error" 归「通用」组管。
+            // [v0.11.0] 色值对齐 UI 同事的 CSS 配色（.log-error/.log-warn/…）
+            (r"\b(ERROR|FATAL|SEVERE)\b", "#D32F2F"),
+            (r"\b(WARN|WARNING)\b", "#F57C00"),
+            (r"\bINFO\b", "#1565C0"),
+            (r"\bDEBUG\b", "#616161"),
+            (r"\bTRACE\b", "#9E9E9E"),
+            (r"(\w+Exception|Traceback)", "#D32F2F"),
+        ],
+    ),
+    (
+        "Nginx",
+        &[
+            (r"\[error\]", "#C00000"),
+            (r"\[warn\]", "#B06A00"),
+            (r#" HTTP/[0-9.]+" 5\d\d "#, "#C00000"),
+            (r#" HTTP/[0-9.]+" 4\d\d "#, "#B06A00"),
+            (r"upstream (timed out|prematurely closed)", "#C00000"),
+        ],
+    ),
+    (
+        "K8s",
+        &[
+            (r"OOMKilled|Back-off|Evicted|FailedScheduling|FailedMount", "#C00000"),
+            (r"Readiness probe failed|Liveness probe failed", "#B06A00"),
+            (r"Started container|Created container|Successfully pulled", "#1A7A1A"),
+            (r"Scaled up replica set|SuccessfulCreate", "#1F6FA8"),
+        ],
+    ),
+    (
+        "数据库",
+        &[
+            (r"Deadlock found|Lock wait timeout|Gap lock", "#C00000"),
+            (r"Access denied for user", "#C00000"),
+            (r"Duplicate entry", "#B06A00"),
+            (r"[Ss]low query|Query execution time", "#B06A00"),
+            (r"connection pool (exhausted|shutdown)|CannotGetJdbcConnection", "#C00000"),
+            (r"BEGIN|COMMIT|ROLLBACK", "#1F6FA8"),
+        ],
+    ),
+    (
+        "Spring",
+        &[
+            (
+                r"BeanCreationException|UnsatisfiedDependencyException|Whitelabel Error Page|ApplicationContext failure",
+                "#C00000",
+            ),
+            (r"Circular (view path|reference|dependenc)", "#B06A00"),
+            (r"Tomcat started on port|Started \w+ ?Application in", "#1A7A1A"),
+            (r#"Mapped "\{[^}]*\}""#, "#808080"),
+        ],
+    ),
+    (
+        "系统",
+        &[
+            (r"Out of memory|oom-?killer|kernel panic", "#C00000"),
+            (r"Segmentation fault|segfault|core dumped", "#C00000"),
+            (r"No space left on device|disk I/O error", "#C00000"),
+            (r"Failed password|Invalid user|authentication failure", "#B06A00"),
+            (r"systemd\[1\]: (Started|Stopped)", "#808080"),
+        ],
+    ),
+    (
+        "链路",
+        &[
+            (r"traceId[=:]\S+|trace_id[=:]\S+", "#1F6FA8"),
+            (r"spanId[=:]\S+|span_id[=:]\S+", "#6A5ACD"),
+            (r"X-B3-TraceId|X-Request-Id", "#6A5ACD"),
+        ],
+    ),
+    (
+        "通用",
+        &[
+            (r"\b(ERROR|FATAL|SEVERE|CRITICAL)\b", "#C00000"),
+            (r"\b(WARN|WARNING)\b", "#B06A00"),
+            (r#""level"\s*:\s*"(?:error|fatal)""#, "#C00000"),
+            (r#""level"\s*:\s*"warn""#, "#B06A00"),
+            (r"level[=:](?:error|fatal)\b", "#C00000"),
+            (r"level[=:]warn\b", "#B06A00"),
+            (r"(Timeout|timed out|refused|reset by peer)", "#E06C75"),
+        ],
+    ),
+];
+
 /// [v0.2.0] 启动自动恢复的上次激活 tab（与 TUI remember_last_source 同心智）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -71,6 +236,8 @@ pub struct Prefs {
     pub filter_history: Vec<String>,
     /// [v0.11.0] 自定义颜色规则（正则→文字色，首条命中覆盖级别色）
     pub color_rules: Vec<ColorRule>,
+    /// [v0.11.0] 面板配色主题（底色/正文/级别色，gui.toml 持久化）
+    pub theme: Theme,
     /// 窗口置顶（BareTail always-on-top）
     pub always_on_top: bool,
     /// 最近打开的文件（新→旧）
@@ -109,6 +276,7 @@ impl Default for Prefs {
             viewer_cmd: String::new(),
             filter_history: Vec::new(),
             color_rules: Vec::new(),
+            theme: Theme::default(),
             always_on_top: false,
             recent_files: Vec::new(),
             saved_filters: default_saved_filters(),
@@ -195,6 +363,7 @@ mod tests {
                 pattern: "RateLimit".into(),
                 color: "#E06C75".into(),
             }],
+            theme: THEMES[1].1.clone(), // 豆沙绿主题往返
             always_on_top: true,
             recent_files: vec!["C:/logs/a.log".into(), "D:/b.out".into()],
             saved_filters: vec![SavedFilter {
@@ -289,5 +458,72 @@ mod tests {
         assert_eq!(p.filter_history.iter().filter(|s| *s == "kw3").count(), 1);
         p.push_filter_history("   ");
         assert_eq!(p.filter_history[0], "kw3", "空白词不记录");
+    }
+
+    /// [v0.11.0] 预设组的正则与 hex 必须全部合法——导入是逐条 push，
+    /// 一条坏正则会让整组规则静默失效
+    #[test]
+    fn color_presets_正则与hex全部合法() {
+        use eframe::egui::Color32;
+        for (name, rules) in COLOR_PRESETS {
+            assert!(!rules.is_empty(), "{name} 预设不能为空");
+            for (p, c) in *rules {
+                assert!(regex::Regex::new(p).is_ok(), "{name} 预设正则非法: {p}");
+                assert!(Color32::from_hex(c).is_ok(), "{name} 预设 hex 非法: {c}");
+            }
+        }
+    }
+
+    /// [v0.11.0] 主题预设的 hex 必须全部合法——渲染层按 hex 解析，坏值整主题失效
+    #[test]
+    fn theme_presets_hex全部合法() {
+        use eframe::egui::Color32;
+        for (name, t) in THEMES.iter() {
+            for (field, hex) in [
+                ("log_bg", &t.log_bg),
+                ("log_fg", &t.log_fg),
+                ("error", &t.error),
+                ("warn", &t.warn),
+                ("info", &t.info),
+                ("debug", &t.debug),
+                ("inferred", &t.inferred),
+                ("stack", &t.stack),
+            ] {
+                assert!(
+                    Color32::from_hex(hex).is_ok(),
+                    "{name} 主题 {field} hex 非法: {hex}"
+                );
+            }
+        }
+    }
+
+    /// [回归] Java 预设必须命中 logback `%-5level` 裸词排版（用户实测：
+    /// 旧版写死 `\[(INFO)\]` 带括号排版，裸词 INFO 一条都匹配不到）
+    #[test]
+    fn java_preset_命中logback裸词排版() {
+        let (_, rules) = COLOR_PRESETS.iter().find(|(n, _)| *n == "Java").unwrap();
+        let compiled: Vec<regex::Regex> = rules
+            .iter()
+            .map(|(p, _)| regex::Regex::new(p).unwrap())
+            .collect();
+        let cases = [
+            ("2026-11-21 10:00:01.123  INFO [main] c.i.Main - started", true),
+            ("2026-11-21 10:00:01.123 [main] INFO c.i.Main - started", true),
+            ("2026-11-21 10:00:01.123 [ERROR] c.i.Main - boom", true),
+            ("java.lang.NullPointerException: x", true),
+            // 类名不误染：TraceFilter 非全大写 TRACE，ErrorReportValve 非 ERROR 词
+            (
+                "at cn.iocoder.yudao.framework.tracer.core.filter.TraceFilter.doFilterInternal(T:45)",
+                false,
+            ),
+            (
+                "at org.apache.catalina.valves.ErrorReportValve.invoke(X:83)",
+                false,
+            ),
+        ];
+        for (line, expect) in cases {
+            let got = compiled.iter().any(|re| re.is_match(line));
+            assert_eq!(got, expect, "行: {line}");
+        }
     }
 }

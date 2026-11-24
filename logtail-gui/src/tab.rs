@@ -6,13 +6,12 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use eframe::egui;
 
 use logtail_core::log::filter::{
     FilterMode, LevelFilter, NO_FILTER, matches_filter, rebuild_view_ctx,
 };
 use logtail_core::log::parser::parse_line_multi;
-use logtail_core::log::{LogBuffer, LogLevel, sparkline};
+use logtail_core::log::{LogBuffer, sparkline};
 use logtail_core::source::{ModeVariant, SourceType};
 
 /// 会话状态直接复用 TUI 的定义（标签也一致）
@@ -797,16 +796,8 @@ fn compile_filter(input: &str, regex_on: bool) -> (Option<FilterMode>, Option<St
     }
 }
 
-/// 级别 → egui 颜色（BareTail 白底风格：深色字，白底上可读）
-pub fn level_color(level: LogLevel) -> egui::Color32 {
-    match level {
-        LogLevel::Error => egui::Color32::from_rgb(192, 0, 0),
-        LogLevel::Warn => egui::Color32::from_rgb(176, 106, 0),
-        LogLevel::Info => egui::Color32::from_rgb(26, 122, 26),
-        LogLevel::Debug => egui::Color32::from_rgb(31, 111, 168),
-        LogLevel::Unknown => egui::Color32::from_rgb(51, 51, 51),
-    }
-}
+// [v0.11.0] 级别→颜色映射已迁往 ui.rs 的 Palette（prefs.theme 主题化），
+// 此处不再保留静态版本——颜色只有主题一个真理源
 
 /// [v0.11.0] 命中块折叠显示列表：view 的极大连续段 = 合并后的命中块（上下文
 /// 展开时相邻区间已在 rebuild_view_ctx 拼成连续 run，块间有间隙），代表行取
@@ -850,6 +841,7 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+    use logtail_core::log::LogLevel;
     use logtail_core::log::filter::rebuild_view;
 
     fn tab() -> Tab {

@@ -21,10 +21,8 @@ use logtail_core::ssh::StreamEvent;
 
 use crate::prefs::{LastTab, Prefs, SavedFilter};
 use crate::pump::{Pump, PumpCmd};
-use crate::tab::{SessionState, Tab, TabKind, level_color, raw_hits, split_other_idx};
+use crate::tab::{SessionState, Tab, TabKind, raw_hits, split_other_idx};
 
-/// 日志区底色（BareTail 白底）
-const LOG_BG: Color32 = Color32::WHITE;
 /// 过滤命中行的整行底色（浅黄高亮，BareTail 风格）
 const HIT_BG: Color32 = Color32::from_rgb(255, 243, 166);
 /// 选中行底色（浅蓝）
@@ -36,9 +34,47 @@ pub(crate) const ERR_FG: Color32 = Color32::from_rgb(192, 0, 0);
 const DETAIL_BG: Color32 = Color32::from_rgb(240, 240, 240);
 /// [v0.1.6] 详情条次要信息（时间/源）颜色
 const DETAIL_MUTED: Color32 = Color32::from_rgb(110, 110, 110);
-/// [v0.11.0] 堆栈跟随的缩进行颜色（#5A5A5A）：白底对比度 ~7:1（WCAG AAA 线），
-/// 退后感保留但比详情条的浅灰更耐看——独立于 DETAIL_MUTED，调深不连带详情条
-const STACK_FG: Color32 = Color32::from_rgb(90, 90, 90);
+// [v0.11.0] LOG_BG / STACK_FG 已并入 prefs.theme（Palette 解析），不再静态定义
+
+/// [v0.11.0] 主题解析结果：prefs.theme 的 hex → Color32（非法字段回落经典白底），
+/// 渲染层唯一取色口——级别/底色/正文/堆栈/推断全部走它，不再直引常量
+#[derive(Clone, Copy)]
+struct Palette {
+    log_bg: Color32,
+    log_fg: Color32,
+    error: Color32,
+    warn: Color32,
+    info: Color32,
+    debug: Color32,
+    inferred: Color32,
+    stack: Color32,
+}
+
+impl Palette {
+    fn level(&self, level: LogLevel) -> Color32 {
+        match level {
+            LogLevel::Error => self.error,
+            LogLevel::Warn => self.warn,
+            LogLevel::Info => self.info,
+            LogLevel::Debug => self.debug,
+            LogLevel::Unknown => self.log_fg,
+        }
+    }
+
+    fn from_theme(t: &crate::prefs::Theme) -> Self {
+        let ok = |hex: &str, fb: Color32| Color32::from_hex(hex).unwrap_or(fb);
+        Self {
+            log_bg: ok(&t.log_bg, Color32::WHITE),
+            log_fg: ok(&t.log_fg, Color32::from_rgb(51, 51, 51)),
+            error: ok(&t.error, Color32::from_rgb(192, 0, 0)),
+            warn: ok(&t.warn, Color32::from_rgb(176, 106, 0)),
+            info: ok(&t.info, Color32::from_rgb(26, 122, 26)),
+            debug: ok(&t.debug, Color32::from_rgb(31, 111, 168)),
+            inferred: ok(&t.inferred, Color32::from_rgb(51, 51, 51)),
+            stack: ok(&t.stack, Color32::from_rgb(90, 90, 90)),
+        }
+    }
+}
 /// [v0.1.6] trace_id 色
 const TRACE_FG: Color32 = Color32::from_rgb(0, 120, 160);
 /// [v0.2.0] sparkline 柱色（青蓝，与 TUI Cyan 同心智）
@@ -81,6 +117,10 @@ pub struct LogTailApp {
     color_rule_key: String,
     /// [v0.11.0] 管理收藏过滤窗口开关
     show_saved_cfg: bool,
+    /// [v0.11.0] 面板配色窗口开关 + 主题解析缓存（theme 变化才重解析）
+    show_theme_cfg: bool,
+    palette_cache: Option<Palette>,
+    palette_key: String,
     /// 每帧落盘去抖
     prefs_dirty: bool,
     /// [v0.2.4] 服务器/源/预设管理窗口（manage.rs）
@@ -109,6 +149,9 @@ impl LogTailApp {
             color_rule_cache: Vec::new(),
             color_rule_key: String::new(),
             show_saved_cfg: false,
+            show_theme_cfg: false,
+            palette_cache: None,
+            palette_key: String::new(),
             prefs_dirty: false,
             manage: crate::manage::ManageState::default(),
         }
@@ -775,6 +818,73 @@ impl LogTailApp {
         }
     }
 
+    /// [v0.11.0] 主题解析缓存：theme 变化才重解析（逐帧 from_hex 不可取）。
+    /// 编辑取色器即时生效——每帧 key 比对，hex 一变下帧就换色
+    fn palette(&mut self) -> Palette {
+        let key = format!("{:?}", self.prefs.theme);
+        if self.palette_key != key {
+            self.palette_cache = Some(Palette::from_theme(&self.prefs.theme));
+            self.palette_key = key;
+        }
+        self.palette_cache.expect("上面分支已填充")
+    }
+
+    /// [v0.11.0] 面板配色窗口：主题预设一键应用 + 八个色位逐个微调（即时生效）
+    fn theme_dialog(&mut self, ctx: &Context) {
+        if !self.show_theme_cfg {
+            return;
+        }
+        let mut open = self.show_theme_cfg;
+        egui::Window::new("面板配色")
+            .open(&mut open)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new("预设整组应用，色位可再微调（日志区即时变色）：").weak());
+                ui.horizontal_wrapped(|ui| {
+                    for (name, t) in crate::prefs::THEMES.iter() {
+                        if ui.small_button(*name).clicked() {
+                            self.prefs.theme = t.clone();
+                            self.prefs_dirty = true;
+                        }
+                    }
+                });
+                ui.separator();
+                let mut edited = false;
+                let t = &mut self.prefs.theme;
+                for (label, hex) in [
+                    ("底色", &mut t.log_bg),
+                    ("正文", &mut t.log_fg),
+                    ("ERROR", &mut t.error),
+                    ("WARN", &mut t.warn),
+                    ("INFO", &mut t.info),
+                    ("DEBUG", &mut t.debug),
+                    ("推断级", &mut t.inferred),
+                    ("堆栈", &mut t.stack),
+                ] {
+                    ui.horizontal(|ui| {
+                        let mut c = Color32::from_hex(hex).unwrap_or(Color32::WHITE);
+                        if ui.color_edit_button_srgba(&mut c).changed() {
+                            *hex = c.to_hex();
+                            edited = true;
+                        }
+                        ui.label(label);
+                    });
+                }
+                if edited {
+                    self.prefs_dirty = true;
+                }
+                ui.separator();
+                ui.label(
+                    RichText::new("存 gui.toml；暗黑主题下命中黄底/选中蓝底仍为浅色高亮")
+                        .weak(),
+                );
+            });
+        self.show_theme_cfg = open;
+        if !open {
+            self.prefs_dirty = true;
+        }
+    }
+
     /// [v0.11.0] 自定义颜色规则编译缓存：prefs 变化才重编（逐帧编译正则不可接受）；
     /// 非法正则/hex 的规则静默跳过（设置窗口里可自行核对）
     fn color_rules(&mut self) -> Vec<(regex::Regex, Color32)> {
@@ -811,6 +921,34 @@ impl LogTailApp {
                     )
                     .weak(),
                 );
+                // [v0.11.0] 预设组一键导入：追加到末尾（已有规则在前 = 优先命中）
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("从预设导入：").weak());
+                    for (name, rules) in crate::prefs::COLOR_PRESETS {
+                        let summary = rules
+                            .iter()
+                            .map(|(p, _)| *p)
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if ui
+                            .small_button(*name)
+                            .on_hover_text(format!("追加 {} 条规则（已有规则保持在前）：\n{summary}", rules.len()))
+                            .clicked()
+                        {
+                            for (p, c) in *rules {
+                                self.prefs.color_rules.push(crate::prefs::ColorRule {
+                                    pattern: (*p).to_string(),
+                                    color: (*c).to_string(),
+                                });
+                            }
+                            self.prefs_dirty = true;
+                            self.status = format!(
+                                "已导入「{name}」预设 {} 条规则（追加在末尾，你的已有规则优先命中）",
+                                rules.len()
+                            );
+                        }
+                    }
+                });
                 ui.separator();
                 let mut removed: Option<usize> = None;
                 for (i, r) in self.prefs.color_rules.iter_mut().enumerate() {
@@ -1166,6 +1304,7 @@ impl eframe::App for LogTailApp {
         self.merge_dialog(&ctx);
         self.color_rules_dialog(&ctx);
         self.saved_cfg_dialog(&ctx);
+        self.theme_dialog(&ctx);
         self.manage_window(&ctx);
         self.handle_dnd(&ctx);
         self.handle_shortcuts(&ctx);
@@ -1403,6 +1542,15 @@ impl LogTailApp {
                         }
                     });
                     ui.separator();
+                    // [v0.11.0] 面板配色主题（底色/正文/级别色，豆沙绿/暗黑预设）
+                    if ui
+                        .button("面板配色…")
+                        .on_hover_text("日志区底色与级别色：经典白底 / 豆沙绿护眼 / 暗黑，可逐色微调")
+                        .clicked()
+                    {
+                        self.show_theme_cfg = true;
+                        ui.close();
+                    }
                     // [v0.11.0] 自定义颜色规则（Multitail 心智：正则→文字色）
                     if ui
                         .button("自定义颜色规则…")
@@ -1823,9 +1971,11 @@ impl LogTailApp {
     }
 
     fn log_area(&mut self, ui: &mut egui::Ui) {
+        // [v0.11.0] 面板主题色（底色/级别色随 gui.toml 主题走）
+        let pal = self.palette();
         egui::CentralPanel::default().show(ui, |ui| {
-            // ---- BareTail 白底：整块自绘，不依赖主题 ----
-            ui.painter().rect_filled(ui.max_rect(), 0.0, LOG_BG);
+            // ---- 面板底色整块自绘（BareTail 白底 → 可换豆沙绿/暗黑主题）----
+            ui.painter().rect_filled(ui.max_rect(), 0.0, pal.log_bg);
             let Some(ti) = self.active_tab_idx() else {
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
@@ -1904,7 +2054,7 @@ impl LogTailApp {
                         if let Some(t) = ts {
                             ui.label(RichText::new(t.to_rfc3339()).color(DETAIL_MUTED));
                         }
-                        ui.label(RichText::new(level.label()).color(level_color(level)));
+                        ui.label(RichText::new(level.label()).color(pal.level(level)));
                         if !source.is_empty() {
                             ui.label(RichText::new(source.as_ref()).color(DETAIL_MUTED));
                         }
@@ -1941,7 +2091,7 @@ impl LogTailApp {
                         .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(&raw).monospace().color(level_color(level)),
+                                    RichText::new(&raw).monospace().color(pal.level(level)),
                                 )
                                 .wrap(),
                             );
@@ -1968,6 +2118,7 @@ impl LogTailApp {
         user_scroll_y: bool,
     ) {
         let stack_follow = self.prefs.stack_follow; // [v0.11.0] 堆栈跟随（渲染层开关）
+        let pal = self.palette(); // [v0.11.0] 面板主题色
         let color_rules = self.color_rules(); // [v0.11.0] 自定义颜色规则（编译缓存）
         // 栏头占用的实际高度从内容高里扣掉，否则窗格内容超出分配盒
         // （首帧定位/跳底/滚动条都会随之错位）
@@ -2096,7 +2247,7 @@ impl LogTailApp {
                         } else if hit {
                             HIT_BG
                         } else {
-                            LOG_BG
+                            pal.log_bg
                         };
                         ui.painter().rect_filled(rect, 0.0, bg);
 
@@ -2107,11 +2258,11 @@ impl LogTailApp {
                         // [v0.11.0] 颜色/语义分离：level_explicit=false 的推断级降灰——
                         // ErrorReportValve 类名误染消失；ERROR+ 过滤语义不受影响
                         let mut color = if is_cont && !hit {
-                            STACK_FG
+                            pal.stack
                         } else if !explicit {
-                            level_color(LogLevel::Unknown)
+                            pal.inferred
                         } else {
-                            level_color(level)
+                            pal.level(level)
                         };
                         // [v0.11.0] 自定义颜色规则：自上而下首条命中覆盖文字色（级别色兜底）
                         for (re, c) in &color_rules {
