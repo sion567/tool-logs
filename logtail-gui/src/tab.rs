@@ -11,7 +11,7 @@ use logtail_core::log::filter::{
     FilterMode, LevelFilter, NO_FILTER, matches_filter, rebuild_view_ctx,
 };
 use logtail_core::log::parser::parse_line_multi;
-use logtail_core::log::{LogBuffer, sparkline};
+use logtail_core::log::{LogLevel, LogBuffer, sparkline_levels};
 use logtail_core::source::{ModeVariant, SourceType};
 
 /// 会话状态直接复用 TUI 的定义（标签也一致）
@@ -145,6 +145,9 @@ pub struct Tab {
 
     /// [v0.2.0] sparkline 分桶（core::sparkline 产出，宽度=spark_width）
     pub spark: Vec<u64>,
+    /// [v0.12.0] spark 各桶的 ERROR/WARN 行数（分级着色；与 spark 同批同宽恒一致）
+    pub spark_err: Vec<u64>,
+    pub spark_warn: Vec<u64>,
     spark_width: usize,
     spark_built_at: usize,
     /// [v0.2.4] spark 末端时间（最新带时间戳行）——时间轴滑块定位的时间基准，
@@ -153,6 +156,13 @@ pub struct Tab {
 
     /// [v0.2.0] 横向滚动像素偏移（←→ 长行平移，Home 复位）
     pub h_scroll_x: f32,
+    /// [v0.12.0] Overview Ruler 标记缓存：(display 下标, 是否 ERROR)——视图内
+    /// 级别 ≥ Warn 的行，随 view_epoch 变化重建（level_marks）
+    pub marks: Vec<(usize, bool)>,
+    marks_epoch: u64,
+    /// [v0.12.0] 视图代次：display 内容变化（全量重建/增量追加）时 +1，
+    /// 标记等派生缓存据此失效
+    view_epoch: u64,
     /// 上一帧日志区宽度（横滚步长 = 半屏）
     pub last_log_width: f32,
 
@@ -162,6 +172,9 @@ pub struct Tab {
     pub detail_line: Option<u64>,
     /// [v0.1.7] 详情条跟随滚动请求：↑↓ 移动选中后置位，渲染层定位后清
     pub scroll_to_line: Option<u64>,
+    /// [v0.12.0] Overview Ruler 的绝对滚动偏移请求：点击/拖动标尺按比例换算
+    /// 成像素偏移，渲染层下一帧作为 force_offset 应用后清（同 jump_to_end 落点机制）
+    pub scroll_to_offset: Option<f32>,
     /// [v0.1.7] 上一帧滚动偏移（scroll_to_line 的可见性判断基准）
     pub last_scroll_offset: f32,
 
@@ -247,13 +260,19 @@ impl Tab {
             view_dedupe: true,
             display: Vec::new(),
             spark: Vec::new(),
+            spark_err: Vec::new(),
+            spark_warn: Vec::new(),
             spark_width: 0,
             spark_built_at: usize::MAX,
             spark_end: None,
             h_scroll_x: 0.0,
+            marks: Vec::new(),
+            marks_epoch: u64::MAX, // 首次 level_marks 必建
+            view_epoch: 0,
             last_log_width: 0.0,
             detail_line: None,
             scroll_to_line: None,
+            scroll_to_offset: None,
             last_scroll_offset: 0.0,
             pending_top_rows: 0,
             file_size: 0,
@@ -328,6 +347,7 @@ impl Tab {
         self.display.clear();
         self.view_dirty = true; // [v0.2.4] 换了新 buffer，水位语义失效 → 全量重建
         self.pending_top_rows = 0; // [v0.10.8] 缓冲已空，无需钉窗补偿
+        self.scroll_to_offset = None; // [v0.12.0] 旧内容的标尺跳转请求作废
     }
 
     /// [v0.2.4] 设置菜单改行数上限（运行中生效）：缩容立即截断超容量部分，
@@ -524,6 +544,7 @@ impl Tab {
             || self.view_dedupe != dedupe
             || self.view_fold_hits != fold_hits
             || self.view_ctx != self.ctx;
+        let mut view_changed = false; // [v0.12.0] 标记缓存等派生数据的失效信号
         // [v0.11.0] 上下文模式（ctx>0）与合并时间线（多源）新行到达即全量重建：
         // 增量需跨水位合并上下文区间 / 跨源重排序，复杂度换不回收益——
         // 命中分析是低频场景，正确性优先
@@ -532,6 +553,7 @@ impl Tab {
             || ((self.ctx > 0 || !self.parts.is_empty())
                 && self.built_next_no != self.buffer.next_no())
         {
+            view_changed = true;
             let (view, hits) = rebuild_view_ctx(
                 &self.buffer,
                 fm.as_ref().unwrap_or(&NO_FILTER),
@@ -563,9 +585,14 @@ impl Tab {
             self.incremental_view(fm.as_ref().unwrap_or(&NO_FILTER), dedupe);
             // ctx=0 时 view 即命中：hit_nos 随 incremental_view 同步（同淘汰同追加）
             self.hit_count = self.view.len();
+            view_changed = true;
         }
         self.built_next_no = self.buffer.next_no();
         self.view_dirty = false;
+        // [v0.12.0] display 变了 → 标记等派生缓存下次按新视图重建
+        if view_changed {
+            self.view_epoch += 1;
+        }
     }
 
     /// [v0.11.0] 合并 tab：view/hit_nos 按「有效时间戳键」稳定重排。键按成员源
@@ -661,17 +688,44 @@ impl Tab {
 
     /// [v0.2.0] sparkline 按需刷新（宽度变化或数据变化后重算；core::sparkline 分桶）；
     /// [v0.2.4] 顺带记录 spark_end（最新带时间戳行）——时间轴滑块定位的时间基准，
-    /// 与 spark 同批产出恒一致。
+    /// 与 spark 同批产出恒一致；
+    /// [v0.12.0] 分级桶（spark_err/spark_warn）与总数同批同宽产出，恒一致。
     pub fn refresh_spark(&mut self, width: usize) {
         if width == 0 {
             return;
         }
         if width != self.spark_width || self.total_pushed != self.spark_built_at {
-            self.spark = sparkline(&self.buffer, width, 1);
+            let lv = sparkline_levels(&self.buffer, width, 1);
+            self.spark = lv.iter().map(|b| b.total).collect();
+            self.spark_err = lv.iter().map(|b| b.err).collect();
+            self.spark_warn = lv.iter().map(|b| b.warn).collect();
             self.spark_end = self.buffer.iter().filter_map(|l| l.timestamp).max();
             self.spark_width = width;
             self.spark_built_at = self.total_pushed;
         }
+    }
+
+    /// [v0.12.0] Overview Ruler 标记：视图（display 折叠后）内级别 ≥ Warn 的行。
+    /// 返回 (display 下标, 是否 ERROR)。随视图重建缓存（view_epoch 变化才重扫
+    /// 一次 display，稳态帧零开销）。
+    pub fn level_marks(&mut self) -> &[(usize, bool)] {
+        if self.marks_epoch != self.view_epoch {
+            self.marks = self
+                .display
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &(no, _))| {
+                    // 只收 Warn/Error：Info/Debug/Unknown 不上标尺
+                    self.buffer.by_line_no(no).and_then(|l| match l.level {
+                        LogLevel::Error => Some((i, true)),
+                        LogLevel::Warn => Some((i, false)),
+                        _ => None,
+                    })
+                })
+                .collect();
+            self.marks_epoch = self.view_epoch;
+        }
+        &self.marks
     }
 
     /// [v0.2.4] 手动跟随开关（工具栏勾选/「末尾」按钮/时间轴定位）：取消时记
@@ -1379,6 +1433,56 @@ mod tests {
         t2.ingest(vec!["plain".into()]);
         t2.refresh_spark(4);
         assert!(t2.spark.iter().all(|&c| c == 0));
+    }
+
+    /// [v0.12.0] 分级桶：err/warn 与总数同批产出、同宽恒一致
+    #[test]
+    fn spark_分级桶错误警告计数() {
+        let mut t = tab();
+        t.ingest(vec![
+            "2026-11-07 10:00:00 ERROR boom".into(),
+            "2026-11-07 10:00:00 WARN careful".into(),
+            "2026-11-07 10:00:00 INFO ok".into(),
+        ]);
+        t.refresh_spark(8);
+        assert_eq!(t.spark_err.len(), 8);
+        assert_eq!(t.spark_warn.len(), 8);
+        assert_eq!(t.spark_err.iter().sum::<u64>(), 1, "1 行 ERROR");
+        assert_eq!(t.spark_warn.iter().sum::<u64>(), 1, "1 行 WARN");
+        // 恒等式：total = err + warn + 其余级别
+        assert_eq!(
+            t.spark.iter().sum::<u64>(),
+            t.spark_err.iter().sum::<u64>() + t.spark_warn.iter().sum::<u64>() + 1
+        );
+        // 宽度变化 → 三者同步重算
+        t.refresh_spark(4);
+        assert_eq!(t.spark_err.len(), 4);
+        assert_eq!(t.spark_warn.len(), 4);
+    }
+
+    /// [v0.12.0] Overview Ruler 标记：视图内级别 ≥ Warn 的 display 下标；
+    /// 视图变化（过滤/清屏）后随 view_epoch 重建
+    #[test]
+    fn level_marks_视图内错误警告下标() {
+        let mut t = tab();
+        t.ingest(vec![
+            "2026-11-07 10:00:00 INFO a".into(),
+            "2026-11-07 10:00:01 WARN b".into(),
+            "2026-11-07 10:00:02 ERROR c".into(),
+            "2026-11-07 10:00:03 INFO d".into(),
+        ]);
+        t.ensure_view(false, false);
+        assert_eq!(t.level_marks(), &[(1, false), (2, true)]);
+        // 视图未变 → 缓存不变（稳态帧零重扫）
+        assert_eq!(t.level_marks(), &[(1, false), (2, true)]);
+        // 过滤掉错误行 → 标记随视图重建为空
+        t.filter_input = "a".into();
+        t.ensure_view(false, false);
+        assert!(t.level_marks().is_empty(), "过滤后视图内无错误警告");
+        // 清屏 → 空
+        t.clear();
+        t.ensure_view(false, false);
+        assert!(t.level_marks().is_empty());
     }
 
     #[test]

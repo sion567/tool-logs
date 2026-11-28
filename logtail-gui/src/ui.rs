@@ -74,6 +74,8 @@ const TAB_CLOSE_W: f32 = 16.0;
 const TAB_H: f32 = 22.0;
 /// [v0.2.4] tab 标题最大宽（超出裁剪，悬停看全名）
 const TAB_MAX_W: f32 = 220.0;
+/// [v0.12.0] 总览标尺窄条宽（日志内容区右侧让位，与 egui 滚动条不重叠）
+const RULER_W: f32 = 10.0;
 
 pub struct LogTailApp {
     pub prefs: Prefs,
@@ -1501,6 +1503,19 @@ impl LogTailApp {
                         self.prefs.show_sparkline = spark;
                         self.prefs_dirty = true;
                     }
+                    // [v0.12.0] 总览标尺（Overview Ruler）：右侧窄条级别标记 + 比例跳转
+                    let mut ruler = self.prefs.show_ruler;
+                    if ui
+                        .checkbox(&mut ruler, "总览标尺（错误/警告标记）")
+                        .on_hover_text(
+                            "日志区右侧细条：红=ERROR、黄=WARN 的整卷分布（同 VS Code minimap 滚轴）；\n\
+                             点击/拖动按比例跳转，点在标记处直接选中该行",
+                        )
+                        .changed()
+                    {
+                        self.prefs.show_ruler = ruler;
+                        self.prefs_dirty = true;
+                    }
                     // [v0.11.0] 多行堆栈跟随：无时间戳行缩进灰显（归属上方最近时间戳行）
                     let mut sf = self.prefs.stack_follow;
                     if ui
@@ -1930,6 +1945,9 @@ impl LogTailApp {
     /// [v0.2.4] 定位滑块：点击/拖动按 x→时间→视图行跳转（显式导航，自动暂停跟随），
     /// 悬停画光标竖线并提示对应时间。桶与 core::sparkline 同构：桶 i 覆盖
     /// 「距末端 [width-1-i, width-i) 秒」。
+    /// [v0.12.0] 分级着色：桶内按构成占比堆叠——错误红（ERR_FG）在顶、警告黄
+    /// （WARN_FG）居中、其余青蓝（SPARK_FG）在底；单行错/警至少 1.5px 可见，
+    /// 悬停提示带本时间点的行数与错/警分布。
     fn spark_bar(&mut self, ui: &mut egui::Ui) {
         if !self.prefs.show_sparkline {
             return;
@@ -1942,6 +1960,8 @@ impl LogTailApp {
             let buckets = ((w / 6.0).floor() as usize).max(10);
             self.tabs[ti].refresh_spark(buckets);
             let spark = self.tabs[ti].spark.clone();
+            let errs = self.tabs[ti].spark_err.clone();
+            let warns = self.tabs[ti].spark_warn.clone();
             let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 16.0), Sense::click_and_drag());
             if spark.iter().all(|&c| c == 0) {
                 resp.on_hover_text("日志量/秒（暂无带时间戳的行）");
@@ -1954,11 +1974,52 @@ impl LogTailApp {
                     continue;
                 }
                 let h = 2.0 + (c as f32 / max as f32) * (r.height() - 2.0);
-                let br = egui::Rect::from_min_size(
-                    egui::pos2(r.left() + i as f32 * bw, r.bottom() - h),
-                    egui::vec2((bw - 1.0).max(1.0), h),
-                );
-                ui.painter().rect_filled(br, 0.0, SPARK_FG);
+                let x = r.left() + i as f32 * bw;
+                let bwid = (bw - 1.0).max(1.0);
+                // [v0.12.0] 分级堆叠（占比按桶内构成；错误在顶最醒目）：
+                // 底=普通 SPARK_FG，中=警告 WARN_FG，顶=错误 ERR_FG
+                let eh = if errs[i] > 0 {
+                    ((errs[i] as f32 / c as f32) * h).max(1.5).min(h)
+                } else {
+                    0.0
+                };
+                let wh = if warns[i] > 0 {
+                    ((warns[i] as f32 / c as f32) * h).max(1.5).min(h - eh)
+                } else {
+                    0.0
+                };
+                let nh = h - eh - wh;
+                let p = ui.painter();
+                if nh > 0.0 {
+                    p.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, r.bottom() - nh),
+                            egui::vec2(bwid, nh),
+                        ),
+                        0.0,
+                        SPARK_FG,
+                    );
+                }
+                if wh > 0.0 {
+                    p.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, r.bottom() - nh - wh),
+                            egui::vec2(bwid, wh),
+                        ),
+                        0.0,
+                        WARN_FG,
+                    );
+                }
+                if eh > 0.0 {
+                    p.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, r.bottom() - h),
+                            egui::vec2(bwid, eh),
+                        ),
+                        0.0,
+                        ERR_FG,
+                    );
+                }
             }
             // [v0.2.4] 悬停光标 + 时间提示；点击/拖动定位
             let pointer = ui.input(|i| i.pointer.interact_pos());
@@ -1980,6 +2041,18 @@ impl LogTailApp {
                 let ts = end - chrono::Duration::seconds(secs_from_end);
                 (ts, ts.format("%m-%d %H:%M:%S").to_string())
             });
+            // [v0.12.0] 悬停桶的构成：行数 + 其中错误/警告
+            let bucket_i = ((p.x - r.left()) / bw).floor() as usize;
+            let comp = spark
+                .get(bucket_i)
+                .map(|&c| {
+                    format!(
+                        " · {c} 行/秒（错 {} · 警 {}）",
+                        errs.get(bucket_i).copied().unwrap_or(0),
+                        warns.get(bucket_i).copied().unwrap_or(0)
+                    )
+                })
+                .unwrap_or_default();
             if locating
                 && let Some((ts, _)) = ts
                 && let Some(no) = self.tabs[ti].locate_time(ts)
@@ -1988,7 +2061,9 @@ impl LogTailApp {
             }
             resp.on_hover_text(match ts {
                 Some((_, label)) if locating => format!("定位到 {label}（拖动可连续扫动）"),
-                Some((_, label)) => format!("日志量/秒（末端=最新）· 此处 {label}；点击/拖动定位"),
+                Some((_, label)) => {
+                    format!("日志量/秒（末端=最新）· 此处 {label}{comp}；点击/拖动定位")
+                }
                 None => "日志量/秒（末端=最新）".into(),
             });
         });
@@ -2162,6 +2237,9 @@ impl LogTailApp {
         let stack_follow = self.prefs.stack_follow; // [v0.11.0] 堆栈跟随（渲染层开关）
         let pal = self.palette(); // [v0.11.0] 面板主题色
         let color_rules = self.color_rules(); // [v0.11.0] 自定义颜色规则（编译缓存）
+        // [v0.12.0] 总览标尺：开时日志内容区右缩一条窄带让位（标尺贴内容区右侧，
+        // egui 滚动条画在内容区右缘内，二者互不重叠）
+        let ruler_w = if self.prefs.show_ruler { RULER_W } else { 0.0 };
         // 栏头占用的实际高度从内容高里扣掉，否则窗格内容超出分配盒
         // （首帧定位/跳底/滚动条都会随之错位）
         let head_h = if show_header {
@@ -2185,7 +2263,10 @@ impl LogTailApp {
         } else {
             0.0
         };
-        let content_size = egui::vec2(size.x, (size.y - head_h).max(60.0));
+        let content_size = egui::vec2(
+            (size.x - ruler_w).max(120.0),
+            (size.y - head_h).max(60.0),
+        );
         let (row_h, font_size, follow, jump, prev_inner_h) = {
             let tab = &mut self.tabs[ti];
             tab.ensure_view(dedupe, self.prefs.fold_hits);
@@ -2231,6 +2312,11 @@ impl LogTailApp {
                 } else if y1 > off + inner {
                     force_offset = Some((y1 - inner).max(0.0));
                 }
+            }
+            // [v0.12.0] 标尺比例跳转请求：绝对像素偏移直接作落点（点击/拖动时按
+            // 上帧 content/视口高换算好，这里一帧应用）
+            if let Some(off) = tab.scroll_to_offset.take() {
+                force_offset = Some(off);
             }
         }
 
@@ -2424,6 +2510,142 @@ impl LogTailApp {
         }
         if jump && at_edge {
             tab.jump_to_end = false; // 到位即收；未到位（新行涌入/尺寸变化）下一帧按新参数重试
+        }
+
+        // ---- [v0.12.0] 总览标尺（Overview Ruler）----
+        // 内容区右侧窄条（备注方案：ScrollArea 滚动状态 + 内容总高 → rect_filled
+        // 比例映射）：① 半透视口窗（当前可见区间）② ERROR 红/WARN 黄标记
+        // （display 行号等比映射，2px 桶量化 + 同桶取最强级别，几千条错误也只画
+        // ≤ 标尺高/2 个矩形）；点击/拖动按比例跳转（绝对偏移下一帧应用），点击
+        // 落在标记 ±4px 内直接选中该行。倒序模式 display 升序但渲染反转，
+        // 标记/跳转一律先换算视觉行。
+        if ruler_w > 0.0 && n > 0 {
+            let inner = out.inner_rect;
+            let ruler = egui::Rect::from_min_max(
+                egui::pos2(inner.right(), inner.top()),
+                egui::pos2(inner.right() + ruler_w, inner.bottom()),
+            );
+            let painter = ui.painter().clone(); // Painter=Arc 克隆廉价；后面 allocate_rect 要 &mut ui
+            // 底轨 = 主题底色 + 左缘弱分隔线（浅/暗底都可读）
+            painter.rect_filled(ruler, 0.0, pal.log_bg);
+            painter.line_segment(
+                [ruler.left_top(), ruler.left_bottom()],
+                (1.0, Color32::from_rgba_unmultiplied(128, 128, 128, 90)),
+            );
+            let content_h = out.content_size.y.max(1.0);
+            let ruler_h = ruler.height().max(1.0);
+            let n_f = n as f32;
+            // ① 视口窗：滚动偏移/内容总高 → 标尺占比（半透灰；标记画在其上仍可读）
+            let off = out.state.clamped_offset().y;
+            let y0 = (off / content_h * ruler_h).clamp(0.0, ruler_h);
+            let y1 = ((off + inner.height()) / content_h * ruler_h).clamp(0.0, ruler_h);
+            if y1 - y0 > 1.0 {
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(ruler.left(), ruler.top() + y0),
+                        egui::pos2(ruler.right(), ruler.top() + y1),
+                    ),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(128, 128, 128, 60),
+                );
+            }
+            // ② 级别标记
+            let marks = tab.level_marks().to_vec();
+            const MARK_PX: f32 = 2.0;
+            let nb = ((ruler_h / MARK_PX).ceil() as usize).max(1);
+            let mut lv = vec![0u8; nb]; // 0 空 / 1 WARN / 2 ERROR
+            for &(di, is_err) in &marks {
+                let vr = if reverse { n - 1 - di } else { di };
+                let b = ((vr as f32 / n_f * nb as f32) as usize).min(nb - 1);
+                let v = if is_err { 2u8 } else { 1u8 };
+                if lv[b] < v {
+                    lv[b] = v;
+                }
+            }
+            for (b, &v) in lv.iter().enumerate() {
+                if v == 0 {
+                    continue;
+                }
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(ruler.left() + 1.0, ruler.top() + b as f32 * MARK_PX),
+                        egui::vec2(ruler_w - 2.0, MARK_PX - 0.5),
+                    ),
+                    0.0,
+                    if v == 2 { ERR_FG } else { WARN_FG },
+                );
+            }
+            // ③ 交互
+            let resp = ui.allocate_rect(ruler, Sense::click_and_drag());
+            let pos_in = ui
+                .input(|i| i.pointer.interact_pos())
+                .filter(|p| ruler.contains(*p));
+            if let Some(p) = pos_in {
+                painter.line_segment(
+                    [egui::pos2(ruler.left(), p.y), egui::pos2(ruler.right(), p.y)],
+                    (1.0, WARN_FG),
+                );
+            }
+            let vis_row_of_y =
+                |y: f32| ((y / ruler_h * n_f).floor() as usize).min(n - 1);
+            let nearest = |y: f32| -> Option<(usize, bool)> {
+                let mut best: Option<(usize, bool, f32)> = None;
+                for &(di, is_err) in &marks {
+                    let vr = if reverse { n - 1 - di } else { di };
+                    let d = ((vr as f32 + 0.5) / n_f * ruler_h - y).abs();
+                    if d <= 4.0 && best.is_none_or(|(_, _, bd)| d < bd) {
+                        best = Some((di, is_err, d));
+                    }
+                }
+                best.map(|(di, is_err, _)| (di, is_err))
+            };
+            if (resp.clicked() || resp.dragged())
+                && let Some(p) = pos_in
+            {
+                let y = p.y - ruler.top();
+                let near = if resp.clicked() { nearest(y) } else { None };
+                match near {
+                    // 点击在标记 ±4px 内 → 选中该行（scroll_to_line 最小滚动进入视口）
+                    Some((di, is_err)) => {
+                        let no = tab.display[di].0;
+                        tab.selected = Some(no);
+                        tab.sel_focus = None;
+                        tab.scroll_to_line = Some(no);
+                        tab.pending_top_rows = 0;
+                        tab.user_set_follow(false);
+                        self.status = format!(
+                            "标尺定位到第 {} 行（{}，跟随已暂停）",
+                            di + 1,
+                            if is_err { "ERROR" } else { "WARN" }
+                        );
+                    }
+                    // 比例跳转：目标行置于视口偏上 35% 处；拖动期间逐帧更新（连续扫动）
+                    None => {
+                        let target = (vis_row_of_y(y) as f32 * row_h
+                            - inner.height() * 0.35)
+                            .clamp(0.0, (content_h - inner.height()).max(0.0));
+                        tab.scroll_to_offset = Some(target);
+                        tab.user_set_follow(false);
+                    }
+                }
+            }
+            if resp.hovered()
+                && let Some(p) = pos_in
+            {
+                let y = p.y - ruler.top();
+                let tip = match nearest(y) {
+                    Some((di, is_err)) => format!(
+                        "第 {} 行 · {}（点击选中该行）",
+                        di + 1,
+                        if is_err { "ERROR" } else { "WARN" }
+                    ),
+                    None => format!(
+                        "约第 {} 行 · 点击/拖动定位（红=ERROR 黄=WARN）",
+                        vis_row_of_y(y) + 1
+                    ),
+                };
+                resp.on_hover_text(tip);
+            }
         }
     }
 

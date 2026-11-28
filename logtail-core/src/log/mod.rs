@@ -95,10 +95,28 @@ impl LogLevel {
     }
 }
 
+/// [v0.12.0] 分级 sparkline 桶：桶内行数 + 其中 ERROR/WARN 行数——GUI 时间轴
+/// 分级着色（红=错误、黄=警告堆叠在密度条上）用；TUI 仍用 sparkline 总数。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SparkBucket {
+    pub total: u64,
+    pub err: u64,
+    pub warn: u64,
+}
+
 /// [v0.7] 时间轴 sparkline（core 化：TUI 工具栏与 GUI 通用）：
 /// 以最新带时间戳的行对齐末端，按 bucket_secs 分桶计行数。
 /// 距末端超过 width 个桶的旧行丢弃；无时间戳的行不计入。
 pub fn sparkline(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<u64> {
+    sparkline_levels(buf, width, bucket_secs)
+        .into_iter()
+        .map(|b| b.total)
+        .collect()
+}
+
+/// [v0.12.0] 分级版 sparkline：分桶口径与 sparkline 完全一致，每桶额外记
+/// ERROR/WARN 行数（级别来自 parser 的 detect_level/显式 token，与过滤同级语义）
+pub fn sparkline_levels(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<SparkBucket> {
     let mut end = None;
     for l in buf.iter() {
         if let Some(ts) = l.timestamp {
@@ -108,13 +126,18 @@ pub fn sparkline(buf: &LogBuffer, width: usize, bucket_secs: i64) -> Vec<u64> {
             });
         }
     }
-    let mut v = vec![0u64; width];
+    let mut v = vec![SparkBucket::default(); width];
     let Some(end) = end else { return v };
     for l in buf.iter() {
         if let Some(ts) = l.timestamp {
             let from_end = (end - ts).num_seconds().max(0) / bucket_secs;
             if let Some(idx) = width.checked_sub(1 + from_end as usize) {
-                v[idx] += 1;
+                v[idx].total += 1;
+                match l.level {
+                    LogLevel::Error => v[idx].err += 1,
+                    LogLevel::Warn => v[idx].warn += 1,
+                    _ => {}
+                }
             }
         }
     }
@@ -158,5 +181,43 @@ mod tests {
             ..Default::default()
         });
         assert!(sparkline(&b2, 5, 1).iter().all(|&c| c == 0));
+    }
+
+    /// [v0.12.0] 分级桶：err/warn 只计入对应级别的行，与 total 同桶同口径
+    #[test]
+    fn sparkline_levels_分级计数() {
+        let mut b = LogBuffer::new(100);
+        let now = Utc::now();
+        let mk = |level: LogLevel, ago: i64| {
+            let mut l = LogLine {
+                raw: "x".into(),
+                ..Default::default()
+            };
+            l.level = level;
+            l.timestamp = Some(now - Duration::seconds(ago));
+            l
+        };
+        for l in [
+            mk(LogLevel::Error, 0),
+            mk(LogLevel::Error, 0),
+            mk(LogLevel::Warn, 0),
+            mk(LogLevel::Info, 2),
+            mk(LogLevel::Unknown, 2), // 无级别行只进 total
+        ] {
+            b.push(l);
+        }
+        let v = sparkline_levels(&b, 5, 1);
+        assert_eq!(v[4], SparkBucket {
+            total: 3,
+            err: 2,
+            warn: 1,
+        });
+        assert_eq!(v[2], SparkBucket {
+            total: 2,
+            err: 0,
+            warn: 0,
+        });
+        // sparkline 总数 = levels 的 total（两函数口径恒一致）
+        assert_eq!(sparkline(&b, 5, 1), vec![0, 0, 2, 0, 3]);
     }
 }

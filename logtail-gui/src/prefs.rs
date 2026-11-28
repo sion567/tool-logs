@@ -236,6 +236,9 @@ pub struct Prefs {
     pub split: bool,
     /// [v0.2.0] 日志量时间轴（默认开）
     pub show_sparkline: bool,
+    /// [v0.12.0] 总览标尺（日志区右侧窄条：ERROR 红/WARN 黄标记 + 视口窗，
+    /// 点击/拖动按比例跳转；同 VS Code minimap 滚轴心智，默认开）
+    pub show_ruler: bool,
     /// [v0.2.0] 上次激活 tab（退出时更新，启动自动恢复）
     pub last_tab: Option<LastTab>,
     pub window: WindowPrefs,
@@ -267,6 +270,7 @@ impl Default for Prefs {
             reverse: false,
             split: false,
             show_sparkline: true,
+            show_ruler: true,
             last_tab: None,
             window: WindowPrefs {
                 w: 1280.0,
@@ -359,6 +363,7 @@ mod tests {
             reverse: true,
             split: true,
             show_sparkline: false,
+            show_ruler: false,
             last_tab: Some(LastTab::Remote {
                 source: "prod-api".into(),
             }),
@@ -384,6 +389,7 @@ mod tests {
         // v0.1.x 旧 gui.toml（无 dedupe/last_tab）→ 默认值，不报错
         assert!(p2.dedupe, "折叠默认开");
         assert!(p2.show_sparkline, "时间轴默认开");
+        assert!(p2.show_ruler, "总览标尺默认开");
         assert!(!p2.reverse, "倒序默认关（时间正序）");
         assert!(!p2.split, "分屏默认关");
         assert!(p2.last_tab.is_none());
